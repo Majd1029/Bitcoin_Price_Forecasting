@@ -49,14 +49,33 @@ price, delta = live_price()
 cols[0].metric("BTC-USD now", f"${price:,.0f}" if price else "n/a",
                f"{delta:+,.0f}" if delta else None)
 for col, (name, m) in zip(cols[1:], metrics.items()):
-    col.metric(f"{name} · R²", f"{m['R2']:.3f}", f"MAE ${m['MAE']:,.0f}", delta_color="off")
+    extra = (f"dir. {m['DirectionAcc']:.1%}" if "DirectionAcc" in m
+             else f"MAE ${m['MAE']:,.0f}")
+    col.metric(f"{name} · R²", f"{m['R2']:.3f}", extra, delta_color="off")
+
+xgb_m, naive_m = metrics.get("XGBoost"), metrics.get("Naive (persistence)")
+if xgb_m and naive_m:
+    beats = naive_m["MAE"] - xgb_m["MAE"]
+    st.warning(
+        f"**XGBoost does not beat a naive baseline.** Predicting each day's "
+        f"close as the previous day's close gives MAE ${naive_m['MAE']:,.0f}; "
+        f"XGBoost gives ${xgb_m['MAE']:,.0f} — a difference of ${beats:,.0f}, "
+        f"in the noise. Its directional accuracy is "
+        f"{xgb_m['DirectionAcc']:.1%}, i.e. a coin flip.\n\n"
+        "The R² near 0.997 is an artifact: each prediction is anchored on the "
+        "previous *actual* close, so almost all the explained variance is "
+        "yesterday's price, not skill. This is the expected result — daily "
+        "crypto returns carry little signal recoverable from lagged returns."
+    )
 
 # ---- controls -----------------------------------------------------------
-available = [c for c in ("xgboost", "prophet") if c in preds.columns]
+available = [c for c in ("xgboost", "naive", "prophet") if c in preds.columns]
 left, right = st.columns([3, 1])
 with right:
+    LABELS = {"xgboost": "XGBoost", "naive": "Naive (persistence)",
+              "prophet": "Prophet"}
     shown = st.multiselect("Models", available, default=available,
-                           format_func=str.capitalize)
+                           format_func=lambda c: LABELS.get(c, c.capitalize()))
     band = st.checkbox("Prophet confidence band", value=True,
                        disabled="prophet_lo" not in preds.columns)
 with left:
@@ -66,7 +85,7 @@ with left:
 view = preds[(preds["date"].dt.date >= start) & (preds["date"].dt.date <= end)]
 
 # ---- chart --------------------------------------------------------------
-COLORS = {"xgboost": "#f7931a", "prophet": "#4c9be8"}
+COLORS = {"xgboost": "#f7931a", "naive": "#888888", "prophet": "#4c9be8"}
 fig = go.Figure()
 
 if band and "prophet_lo" in view.columns and "prophet" in shown:
@@ -79,7 +98,8 @@ if band and "prophet_lo" in view.columns and "prophet" in shown:
 fig.add_trace(go.Scatter(x=view["date"], y=view["actual"], name="Actual",
                          line=dict(color="#e8e8e8", width=2)))
 for m in shown:
-    fig.add_trace(go.Scatter(x=view["date"], y=view[m], name=m.capitalize(),
+    fig.add_trace(go.Scatter(x=view["date"], y=view[m],
+                             name=LABELS.get(m, m.capitalize()),
                              line=dict(color=COLORS.get(m), width=2, dash="dot")))
 
 if lstm is not None:
@@ -108,7 +128,7 @@ st.plotly_chart(fig, use_container_width=True)
 with st.expander("Residuals (actual − predicted)"):
     resid = pd.DataFrame({"date": view["date"]})
     for m in shown:
-        resid[m.capitalize()] = view["actual"] - view[m]
+        resid[LABELS.get(m, m.capitalize())] = view["actual"] - view[m]
     st.line_chart(resid.set_index("date"))
 
 if meta:
