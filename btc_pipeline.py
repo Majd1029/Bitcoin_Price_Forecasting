@@ -7,6 +7,26 @@ Differences from the notebook, all deliberate:
     also bloat the Streamlit Cloud image. The app treats it as optional.
   * yfinance now returns MultiIndex columns; they are flattened here. The
     notebook's `df['Close']` would break on a fresh run without this.
+  * XGBoost predicts LOG-RETURNS, not absolute price.
+
+Why the target changed. The notebook regresses on absolute close. Gradient-
+boosted trees predict a piecewise-constant function bounded by the targets they
+saw in training, so a model trained on 2018-2022 (BTC peak ~$69k) cannot emit a
+value above roughly that, no matter the input. Measured on the 2023-2026 test
+window that produced:
+
+    max XGBoost prediction  $63,975
+    max actual price       $124,753
+    2023 MAE  $1,111   |   2025 MAE  $40,094
+
+Modelling log-returns makes the target stationary, and the price path is
+rebuilt as C_hat[t] = C[t-1] * exp(r_hat[t]).
+
+Because that reconstruction is anchored on the previous ACTUAL close, it is a
+one-step-ahead forecast and will score a high R2 almost mechanically. A naive
+persistence baseline (C_hat[t] = C[t-1]) is therefore computed too: that is the
+number XGBoost has to beat for any of this to mean anything. Directional
+accuracy is reported for the same reason.
 """
 import json
 import os
@@ -39,12 +59,18 @@ df = df[["Close"]].dropna()
 print(f"  {len(df)} rows, {df.index.min().date()} -> {df.index.max().date()}")
 
 # ------------------------------------------------------------ features
-df["Lag1"] = df["Close"].shift(1)
-df["Lag7"] = df["Close"].shift(7)
-df["Lag30"] = df["Close"].shift(30)
-df["Rolling_Mean_7"] = df["Close"].rolling(7).mean()
-df["Rolling_Mean_30"] = df["Close"].rolling(30).mean()
-df["Rolling_Std_7"] = df["Close"].rolling(7).std()
+# target: next-day log return, stationary and unbounded in price space
+df["LogRet"] = np.log(df["Close"]).diff()
+
+# features are all lagged returns / return statistics — never absolute price,
+# which is what capped the original model
+for lag in (1, 2, 3, 7, 14, 30):
+    df[f"Ret_Lag{lag}"] = df["LogRet"].shift(lag)
+df["Ret_Mean_7"] = df["LogRet"].shift(1).rolling(7).mean()
+df["Ret_Mean_30"] = df["LogRet"].shift(1).rolling(30).mean()
+df["Ret_Std_7"] = df["LogRet"].shift(1).rolling(7).std()
+df["Ret_Std_30"] = df["LogRet"].shift(1).rolling(30).std()
+df["PrevClose"] = df["Close"].shift(1)
 df = df.dropna()
 
 df["Year"] = df.index.year
@@ -53,12 +79,13 @@ df["Day"] = df.index.day
 df["Dayofweek"] = df.index.dayofweek
 df["Is_weekend"] = (df.index.dayofweek >= 5).astype(int)
 
-FEATURES = ["Year", "Month", "Day", "Dayofweek", "Is_weekend", "Lag1", "Lag7",
-            "Lag30", "Rolling_Mean_7", "Rolling_Mean_30", "Rolling_Std_7"]
+FEATURES = ([f"Ret_Lag{l}" for l in (1, 2, 3, 7, 14, 30)]
+            + ["Ret_Mean_7", "Ret_Mean_30", "Ret_Std_7", "Ret_Std_30",
+               "Month", "Dayofweek", "Is_weekend"])
 
 train = df.loc[df.index < SPLIT]
 test = df.loc[df.index >= SPLIT]
-X_train, y_train = train[FEATURES], train["Close"]
+X_train, y_train = train[FEATURES], train["LogRet"]
 X_test, y_test = test[FEATURES], test["Close"]
 print(f"  train {len(train)} / test {len(test)}")
 
@@ -77,7 +104,10 @@ search = RandomizedSearchCV(
 )
 search.fit(X_train, y_train)
 best = search.best_estimator_
-xgb_pred = best.predict(X_test)
+xgb_ret = best.predict(X_test)
+# rebuild the price path from predicted returns
+xgb_pred = test["PrevClose"].values * np.exp(xgb_ret)
+naive_pred = test["PrevClose"].values          # persistence baseline
 print(f"  best params: {search.best_params_}")
 
 
@@ -89,8 +119,22 @@ def score(true, pred):
     }
 
 
-metrics = {"XGBoost": score(y_test, xgb_pred)}
+def direction_acc(true_prices, pred_prices, prev):
+    return float((np.sign(np.asarray(true_prices) - prev)
+                  == np.sign(np.asarray(pred_prices) - prev)).mean())
+
+prev = test["PrevClose"].values
+metrics = {
+    "XGBoost": score(y_test, xgb_pred),
+    "Naive (persistence)": score(y_test, naive_pred),
+}
+# Directional accuracy is only defined for a model that predicts a change.
+# Persistence predicts none, so it gets no DirectionAcc key at all rather than
+# a misleading 0%.
+metrics["XGBoost"]["DirectionAcc"] = direction_acc(y_test, xgb_pred, prev)
 print(f"  XGBoost {metrics['XGBoost']}")
+print(f"  Naive   {metrics['Naive (persistence)']}")
+print(f"  max xgb prediction ${xgb_pred.max():,.0f} vs max actual ${y_test.max():,.0f}")
 
 # ------------------------------------------------------ kmeans + trend
 scaler_k = MinMaxScaler()
@@ -147,6 +191,7 @@ pd.DataFrame({
     "date": test.index,
     "actual": np.asarray(y_test).ravel(),
     "xgboost": np.asarray(xgb_pred).ravel(),
+    "naive": np.asarray(naive_pred).ravel(),
 }).to_csv(OUT / "predictions.csv", index=False)
 
 last = df.index.max()
@@ -166,7 +211,10 @@ pd.DataFrame({
     "n_test": int(len(test)),
     "xgb_best_params": {k: (v.item() if hasattr(v, "item") else v)
                         for k, v in search.best_params_.items()},
-    "note": "Prophet omitted; see btc_pipeline.py header.",
+    "target": "log-return, price path reconstructed from previous actual close",
+    "note": ("XGBoost predicts log-returns; a naive persistence baseline is "
+             "included because one-step-ahead price R2 is high by construction. "
+             "Prophet omitted. See btc_pipeline.py header."),
 }, indent=2))
 
 print("\nwrote:", *[p.name for p in sorted(OUT.iterdir())])
