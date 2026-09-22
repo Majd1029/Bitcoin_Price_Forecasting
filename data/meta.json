@@ -1,0 +1,17 @@
+{
+  "ticker": "BTC-USD",
+  "data_start": "2018-02-01",
+  "data_end": "2026-09-22",
+  "train_test_split": "2023-01-01",
+  "n_train": 1795,
+  "n_test": 1361,
+  "xgb_best_params": {
+    "subsample": 0.7,
+    "n_estimators": 50,
+    "max_depth": 6,
+    "learning_rate": 0.01,
+    "colsample_bytree": 0.7
+  },
+  "target": "log-return, price path reconstructed from previous actual close",
+  "note": "XGBoost predicts log-returns; a naive persistence baseline is included because one-step-ahead price R2 is high by construction. Prophet omitted. See btc_pipeline.py header."
+}
