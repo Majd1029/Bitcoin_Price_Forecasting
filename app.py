@@ -26,28 +26,71 @@ def load():
     return preds, metrics, lstm, meta
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900, show_spinner=False)
 def live_price():
-    """Optional live tick. Never blocks the page if Yahoo is unreachable."""
+    """Current BTC price, from whichever public source answers first.
+
+    yfinance alone is not reliable here: Yahoo throttles or blocks shared
+    datacenter IPs, so on a hosted runner it returns empty frames or raises
+    while working fine from a laptop. CoinGecko and Coinbase both permit
+    server-side calls without a key.
+
+    Returns (price, change_usd, source) or (None, None, reason).
+    """
+    import json
+    import urllib.request
+
+    def _get(url, timeout=6):
+        req = urllib.request.Request(url, headers={"User-Agent": "portfolio-demo"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+
+    # CoinGecko: price plus 24h change in one call
+    try:
+        d = _get("https://api.coingecko.com/api/v3/simple/price"
+                 "?ids=bitcoin&vs_currencies=usd&include_24h_change=true")
+        px = float(d["bitcoin"]["usd"])
+        pct = d["bitcoin"].get("usd_24h_change")
+        chg = px * float(pct) / 100.0 if pct is not None else None
+        return px, chg, "CoinGecko"
+    except Exception:
+        pass
+
+    # Coinbase: spot only, no change
+    try:
+        d = _get("https://api.coinbase.com/v2/prices/BTC-USD/spot")
+        return float(d["data"]["amount"]), None, "Coinbase"
+    except Exception:
+        pass
+
+    # yfinance last, since it is the one that fails on hosted runners
     try:
         import yfinance as yf
 
         hist = yf.Ticker("BTC-USD").history(period="2d")
         if len(hist) >= 2:
             latest, prev = hist["Close"].iloc[-1], hist["Close"].iloc[-2]
-            return float(latest), float(latest - prev)
+            return float(latest), float(latest - prev), "Yahoo"
     except Exception:
         pass
-    return None, None
+
+    return None, None, "no price source reachable"
 
 
 preds, metrics, lstm, meta = load()
 
 # ---- metric row ---------------------------------------------------------
 cols = st.columns(len(metrics) + 1)
-price, delta = live_price()
-cols[0].metric("BTC-USD now", f"${price:,.0f}" if price else "n/a",
-               f"{delta:+,.0f}" if delta else None)
+price, delta, source = live_price()
+cols[0].metric(
+    "BTC-USD now",
+    f"${price:,.0f}" if price else "unavailable",
+    f"{delta:+,.0f} (24h)" if delta else None,
+    help=(f"Live spot from {source}, cached 15 min."
+          if price else
+          f"Live price unavailable: {source}. The forecasts below are "
+          "precomputed and unaffected."),
+)
 for col, (name, m) in zip(cols[1:], metrics.items()):
     extra = (f"dir. {m['DirectionAcc']:.1%}" if "DirectionAcc" in m
              else f"MAE ${m['MAE']:,.0f}")
@@ -76,8 +119,10 @@ with right:
               "prophet": "Prophet"}
     shown = st.multiselect("Models", available, default=available,
                            format_func=lambda c: LABELS.get(c, c.capitalize()))
-    band = st.checkbox("Prophet confidence band", value=True,
-                       disabled="prophet_lo" not in preds.columns)
+    # Prophet is not part of this pipeline (see btc_pipeline.py), so the
+    # control only appears if prophet columns are actually present.
+    band = (st.checkbox("Prophet confidence band", value=True)
+            if "prophet_lo" in preds.columns else False)
 with left:
     lo, hi = preds["date"].min().date(), preds["date"].max().date()
     start, end = st.slider("Test window", lo, hi, (lo, hi), format="YYYY-MM-DD")
