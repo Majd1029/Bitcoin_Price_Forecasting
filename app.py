@@ -48,7 +48,7 @@ def live_price():
     # CoinGecko: price plus 24h change in one call
     try:
         d = _get("https://api.coingecko.com/api/v3/simple/price"
-                 "?ids=bitcoin&vs_currencies=usd&include_24h_change=true")
+                 "?ids=bitcoin&vs_currencies=usd&include_24hr_change=true")
         px = float(d["bitcoin"]["usd"])
         pct = d["bitcoin"].get("usd_24h_change")
         chg = px * float(pct) / 100.0 if pct is not None else None
