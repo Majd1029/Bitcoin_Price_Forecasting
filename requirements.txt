@@ -1,3 +1,8 @@
+# Python 3.11 recommended (Streamlit Cloud: Settings -> General -> Python
+# version). These are all pure-python or widely-built wheels, so 3.12/3.13 will
+# also resolve - unlike the other two apps in this portfolio, which pin torch
+# and tensorflow and hard-fail on 3.14.
+
 streamlit==1.64.0
 pandas==2.2.3
 numpy==2.1.3
