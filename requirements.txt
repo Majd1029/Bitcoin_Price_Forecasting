@@ -8,3 +8,4 @@ yfinance==0.2.51
 xgboost
 scikit-learn
 tensorflow-cpu
+scipy

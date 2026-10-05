@@ -15,14 +15,14 @@
       --bg: #f5f5f7; --card: #ffffff; --card-2: #f2f2f4; --text: #1d1d1f; --muted: #6e6e73;
       --border: rgba(0, 0, 0, 0.07); --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
       --accent: #f7931a; --accent-2: #f59e0b; --grid: rgba(0,0,0,.07);
-      --actual: #1d1d1f; --naive: #8e8e93; --lstm: #16a34a; --kmeans: #db2777;
+      --actual: #1d1d1f; --naive: #8e8e93; --lstm: #16a34a; --kmeans: #db2777; --lstm1: #0284c7; --good-bg: #f0fdf4; --good-border: #bbf7d0;
       --ok: #16a34a; --bad: #dc2626; --warn-bg: #fff7ed; --warn-border: #fed7aa;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #0b0b0c; --card: #161618; --card-2: #1f1f22; --text: #f5f5f7; --muted: #a1a1a6;
         --border: rgba(255,255,255,.08); --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-        --grid: rgba(255,255,255,.08); --actual: #e8e8ea; --naive: #8e8e93; --lstm: #4ade80; --kmeans: #f472b6;
+        --grid: rgba(255,255,255,.08); --actual: #e8e8ea; --naive: #8e8e93; --lstm: #4ade80; --kmeans: #f472b6; --lstm1: #38bdf8; --good-bg: rgba(22,163,74,.1); --good-border: rgba(74,222,128,.3);
         --ok: #4ade80; --bad: #f87171; --warn-bg: rgba(247,147,26,.1); --warn-border: rgba(247,147,26,.3);
       }
     }
@@ -54,6 +54,12 @@
     .callout { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 20px; padding: 18px 20px; margin-bottom: 16px; font-size: 15px; }
     .callout b { font-weight: 700; }
     .callout p + p { margin-top: 8px; color: var(--muted); }
+    .callout.good { background: var(--good-bg); border-color: var(--good-border); }
+    .vol-card { padding: 20px 20px 12px; margin-bottom: 16px; }
+    .vol-card .callout { margin: 12px 0 8px; }
+    #volChart { width: 100%; height: 340px; }
+    tr.group th { text-align: left; padding-top: 18px; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: 0; }
+    td .p { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
 
     .chart-card { padding: 20px 20px 12px; margin-bottom: 16px; }
     .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -99,6 +105,7 @@
       .card { border-radius: 20px; }
       .chart-card { padding: 14px 10px 8px; }
       #chart { height: 380px; }
+      #volChart { height: 300px; }
     }
   </style>
 </head>
@@ -106,7 +113,7 @@
   <div class="wrap">
     <header>
       <h1><span>Bitcoin</span> Price Forecasting</h1>
-      <p class="sub">XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, scored on 2023 onward against a naive baseline. Models are trained offline; this page renders the stored predictions.</p>
+      <p class="sub">XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, plus a next-week volatility forecast. Every model is scored on 2023 onward against the naive baseline for its horizon. Models are trained offline; this page renders the stored predictions.</p>
     </header>
 
     <div class="msg" id="error" hidden></div>
@@ -135,6 +142,13 @@
       <p class="chart-note">Drag on the chart to zoom, double-click to reset. The dashed lines after the last actual close are the LSTM and KMeans 7-day forecasts.</p>
     </section>
 
+    <section class="card vol-card" id="volSection" hidden aria-label="Next-week volatility forecast">
+      <h2>Next-week volatility: the part that is predictable</h2>
+      <div class="callout good" id="volCallout"></div>
+      <div id="volChart" role="img" aria-label="Line chart of realized next-week volatility against forecasts"></div>
+      <p class="chart-note">Annualized volatility of daily returns over the following 7 days, forecast at each day's close. The time range follows the buttons above.</p>
+    </section>
+
     <div class="grid2">
       <section class="card">
         <h2>Results</h2>
@@ -149,6 +163,8 @@
         <h2>How to read this</h2>
         <p><b>The R² near 0.997 is an artifact.</b> Each XGBoost prediction is anchored on the previous <i>actual</i> close, so almost all the explained variance is yesterday's price, not skill. That is why a naive "tomorrow = today" baseline is shown next to it.</p>
         <p><b>Log-returns, not prices.</b> Trees can't predict above the highest price seen in training, so XGBoost models log-returns and rebuilds the price path from them.</p>
+        <p id="fairNote" hidden><b>Scored fairly.</b> Tuning uses time-series cross-validation, scaling uses the training years only, and 7-day forecasts are scored every week of the test period using only data up to that day. Direction accuracy comes with a binomial test against a coin flip.</p>
+        <p id="volNote" hidden><b>Volatility clusters.</b> Calm weeks follow calm weeks, so how much the price will move is far more predictable than which way. The HAR model is a linear blend of the last day's, week's and month's volatility.</p>
         <p id="meta"></p>
       </section>
     </div>
@@ -176,12 +192,13 @@
     const SERIES = [
       { key: 'actual', label: 'Actual', color: '--actual', file: 'pred', dash: 'solid', width: 2, fixed: true },
       { key: 'xgboost', label: 'XGBoost', color: '--accent', file: 'pred', dash: 'dot', width: 2 },
+      { key: 'lstm', label: 'LSTM', color: '--lstm1', file: 'pred', dash: 'dot', width: 1.5 },
       { key: 'naive', label: 'Naive (persistence)', color: '--naive', file: 'pred', dash: 'dot', width: 1.5 },
       { key: 'lstm_forecast', label: 'LSTM 7-day', color: '--lstm', file: 'fc', dash: 'dash', width: 2, markers: true },
       { key: 'kmeans_forecast', label: 'KMeans+LR 7-day', color: '--kmeans', file: 'fc', dash: 'dash', width: 2, markers: true },
     ];
     const visible = Object.fromEntries(SERIES.map((s) => [s.key, true]));
-    let pred = null, fc = null, months = 0;
+    let pred = null, fc = null, vol = null, months = 0;
 
     function parseCSV(text) {
       const [head, ...rows] = text.trim().split(/\r?\n/);
@@ -237,44 +254,96 @@
     }
 
     // ------------------------------------------------------- stats, table
-    function renderMetrics(metrics) {
-      const stats = $('stats');
-      for (const [name, m] of Object.entries(metrics)) {
-        const div = document.createElement('div');
-        div.className = 'card stat';
-        div.innerHTML = '<div class="label"></div><div class="value"></div><div class="note"></div>';
-        div.querySelector('.label').textContent = name.replace(' (persistence)', '') + ' · MAE';
-        div.querySelector('.value').textContent = usd(m.MAE);
-        div.querySelector('.note').textContent = 'R² ' + m.R2.toFixed(3) + (m.DirectionAcc != null ? ' · dir. ' + (m.DirectionAcc * 100).toFixed(1) + '%' : '');
-        stats.appendChild(div);
-      }
+    // metrics.json groups models by horizon. Data exported before that change
+    // is a flat {model: metrics} object; read it as the 1-day group.
+    function normalize(metrics) {
+      if (metrics.one_day) return metrics;
+      const { XGBoost, 'Naive (persistence)': naive, ...rest } = metrics;
+      return { one_day: { XGBoost, 'Naive (persistence)': naive }, other: rest };
+    }
+    const pct = (v, d = 1) => (v * 100).toFixed(d) + '%';
+    const pText = (p) => p < 0.001 ? 'p < 0.001' : 'p = ' + p.toFixed(2);
 
-      const best = Math.min(...Object.values(metrics).map((m) => m.MAE));
+    function statCard(label, value, note) {
+      const div = document.createElement('div');
+      div.className = 'card stat';
+      div.innerHTML = '<div class="label"></div><div class="value"></div><div class="note"></div>';
+      div.querySelector('.label').textContent = label;
+      div.querySelector('.value').textContent = value;
+      div.querySelector('.note').textContent = note;
+      $('stats').appendChild(div);
+    }
+
+    function renderMetrics(raw) {
+      const M = normalize(raw);
+      const x = M.one_day['XGBoost'], n = M.one_day['Naive (persistence)'], l = M.one_day['LSTM'];
+      if (x) statCard('XGBoost · next day', usd(x.MAE) + ' MAE', 'dir. ' + pct(x.DirectionAcc) + (x.DirectionP != null ? ' · ' + pText(x.DirectionP) : ''));
+      if (l) statCard('LSTM · next day', usd(l.MAE) + ' MAE', 'dir. ' + pct(l.DirectionAcc) + ' · ' + pText(l.DirectionP));
+      if (n) statCard('Naive · next day', usd(n.MAE) + ' MAE', 'tomorrow = today');
+      const har = M.volatility && M.volatility['HAR'];
+      if (har) statCard('Volatility · HAR', '−' + pct(har.VsNaive, 0) + ' error', 'vs. "same as last week"');
+      for (const [name, m] of Object.entries(M.other || {})) statCard(name + ' · MAE', usd(m.MAE), 'R² ' + m.R2.toFixed(3));
+
+      // Results table, one group per horizon; the best MAE in each is bold.
+      const GROUPS = [
+        ['one_day', 'Next day (price)', usd],
+        ['seven_day', 'Next 7 days (price, every week of the test period)', usd],
+        ['volatility', 'Next-week volatility (annualized, % points)', (v) => v.toFixed(1)],
+        ['other', 'Other models', usd],
+      ];
       const tbody = document.querySelector('#table tbody');
-      for (const [name, m] of Object.entries(metrics)) {
-        const tr = document.createElement('tr');
-        const cells = [name, usd(m.MAE), usd(m.RMSE), m.R2.toFixed(3), m.DirectionAcc != null ? (m.DirectionAcc * 100).toFixed(1) + '%' : '—'];
-        cells.forEach((c, i) => {
-          const td = document.createElement('td');
-          td.textContent = c;
-          if (i === 1 && m.MAE === best) td.className = 'best';
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
+      for (const [key, title, fmt] of GROUPS) {
+        const group = M[key];
+        if (!group || !Object.keys(group).length) continue;
+        const head = document.createElement('tr');
+        head.className = 'group';
+        head.innerHTML = '<th colspan="5"></th>';
+        head.firstChild.textContent = title;
+        tbody.appendChild(head);
+        const best = Math.min(...Object.values(group).map((m) => m.MAE));
+        for (const [name, m] of Object.entries(group)) {
+          const tr = document.createElement('tr');
+          const cells = [name, fmt(m.MAE), fmt(m.RMSE), m.R2.toFixed(3), m.DirectionAcc != null ? pct(m.DirectionAcc) : '—'];
+          cells.forEach((c, i) => {
+            const td = document.createElement('td');
+            td.textContent = c;
+            if (i === 1 && m.MAE === best) td.className = 'best';
+            if (i === 4 && m.DirectionP != null) {
+              const sm = document.createElement('span');
+              sm.className = 'p'; sm.textContent = pText(m.DirectionP);
+              td.appendChild(sm);
+            }
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        }
       }
 
-      const x = metrics['XGBoost'], n = metrics['Naive (persistence)'];
       if (x && n) {
         const c = $('callout');
         const diff = Math.abs(x.MAE - n.MAE);
+        const beatsCoin = x.DirectionP != null && x.DirectionP < 0.05;
         c.innerHTML = '<p></p><p></p>';
-        c.firstChild.innerHTML = '<b>XGBoost does not beat a naive baseline.</b> ';
+        c.firstChild.innerHTML = '<b>No model beats a naive baseline on price.</b> ';
         c.firstChild.append(
           'Predicting each day\'s close as the previous day\'s close gives MAE ' + usd(n.MAE) +
-          '; XGBoost gives ' + usd(x.MAE) + ', a difference of ' + usd(diff) + ', in the noise. Its directional accuracy is ' +
-          (x.DirectionAcc * 100).toFixed(1) + '%, a coin flip.');
+          '; XGBoost gives ' + usd(x.MAE) + ', a difference of ' + usd(diff) + '. Its directional accuracy is ' +
+          pct(x.DirectionAcc) + (x.DirectionP == null ? ', a coin flip.'
+            : beatsCoin ? ' (' + pText(x.DirectionP) + '): a small edge over a coin flip.'
+            : ' (' + pText(x.DirectionP) + '): statistically indistinguishable from a coin flip.'));
         c.lastChild.textContent = 'This is the expected result: daily crypto returns carry little signal recoverable from lagged returns, and a model that claims otherwise usually has a leak.';
         c.hidden = false;
+      }
+      if (M.seven_day) $('fairNote').hidden = false;
+      if (har) {
+        const naive = M.volatility['Naive (last 7 days)'];
+        const vc = $('volCallout');
+        vc.innerHTML = '<b></b> ';
+        vc.firstChild.textContent = 'Volatility is predictable.';
+        vc.append('Forecasting next week\'s volatility, the HAR model\'s error is ' + har.MAE.toFixed(1) +
+          ' points against ' + naive.MAE.toFixed(1) + ' for "next week looks like last week": ' + pct(har.VsNaive, 0) + ' lower' +
+          (M.volatility['XGBoost'] ? ', and XGBoost\'s is ' + pct(M.volatility['XGBoost'].VsNaive, 0) + ' lower.' : '.'));
+        $('volNote').hidden = false;
       }
     }
 
@@ -368,9 +437,33 @@
       }
     }
 
+    const VOL_SERIES = [
+      { key: 'actual', label: 'Realized', color: '--actual', width: 1.5 },
+      { key: 'har', label: 'HAR forecast', color: '--accent', width: 2 },
+      { key: 'naive', label: 'Last 7 days', color: '--naive', width: 1, dash: 'dot' },
+    ];
+    function drawVol() {
+      if (!vol) return;
+      const start = windowStart();
+      const traces = VOL_SERIES.map((s) => ({
+        type: 'scatter', mode: 'lines', name: s.label, x: vol.date, y: vol[s.key],
+        line: { color: css(s.color), width: s.width, dash: s.dash || 'solid' },
+        hovertemplate: '%{y:.0f}%',
+      }));
+      const range = yRange(traces);
+      Plotly.react('volChart', traces, layout({
+        showlegend: true, legend: { orientation: 'h', y: 1.1, x: 0 },
+        margin: { l: 48, r: 12, t: 28, b: 32 },
+        xaxis: { showgrid: false, linecolor: css('--grid'), range: start ? [start, vol.date[vol.date.length - 1]] : undefined },
+        yaxis: { gridcolor: css('--grid'), zeroline: false, ticksuffix: '%', range, autorange: range ? false : true },
+      }), config);
+    }
+
     function buildChips() {
       const chips = $('chips');
       for (const s of SERIES) {
+        const src = s.file === 'pred' ? pred : fc;
+        if (!src || !src[s.key]) continue;   // series not in this export
         const b = document.createElement('button');
         b.type = 'button'; b.className = 'chip';
         b.style.setProperty('--c', 'var(' + s.color + ')');
@@ -391,25 +484,28 @@
       months = Number(b.dataset.months);
       document.querySelectorAll('.range').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       draw();
+      drawVol();
     }));
     document.querySelector('details').addEventListener('toggle', draw);
-    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { draw(); drawVol(); });
 
     async function init() {
       showLive();
       try {
-        const [p, f, metrics, meta] = await Promise.all([
+        const [p, f, metrics, meta, v] = await Promise.all([
           getData('data/predictions.csv'),
           getData('data/lstm_forecast.csv').catch(() => null),
           getData('data/metrics.json', 'json'),
           getData('data/meta.json', 'json').catch(() => null),
+          getData('data/volatility.csv').catch(() => null),
         ]);
-        pred = p; fc = f;
+        pred = p; fc = f; vol = v;
         renderMetrics(metrics);
         renderMeta(meta);
         buildChips();
-        if (window.Plotly) draw();
-        else throw new Error('The chart library failed to load.');
+        if (!window.Plotly) throw new Error('The chart library failed to load.');
+        draw();
+        if (vol) { $('volSection').hidden = false; drawVol(); }
       } catch (err) {
         $('error').textContent = 'Could not load the forecast data: ' + err.message;
         $('error').hidden = false;
