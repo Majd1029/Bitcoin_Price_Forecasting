@@ -143,10 +143,10 @@
     </section>
 
     <section class="card vol-card" id="volSection" hidden aria-label="Next-week volatility forecast">
-      <h2>Next-week volatility: the part that is predictable</h2>
-      <div class="callout good" id="volCallout"></div>
+      <h2 id="volTitle">Next-week volatility</h2>
+      <div class="callout" id="volCallout"></div>
       <div id="volChart" role="img" aria-label="Line chart of realized next-week volatility against forecasts"></div>
-      <p class="chart-note">Annualized volatility of daily returns over the following 7 days, forecast at each day's close. The time range follows the buttons above.</p>
+      <p class="chart-note">Annualized volatility of daily returns over the following 7 days, forecast at each day's close. HAR is refitted every week on the previous two years. The time range follows the buttons above.</p>
     </section>
 
     <div class="grid2">
@@ -164,7 +164,7 @@
         <p><b>The R² near 0.997 is an artifact.</b> Each XGBoost prediction is anchored on the previous <i>actual</i> close, so almost all the explained variance is yesterday's price, not skill. That is why a naive "tomorrow = today" baseline is shown next to it.</p>
         <p><b>Log-returns, not prices.</b> Trees can't predict above the highest price seen in training, so XGBoost models log-returns and rebuilds the price path from them.</p>
         <p id="fairNote" hidden><b>Scored fairly.</b> Tuning uses time-series cross-validation, scaling uses the training years only, and 7-day forecasts are scored every week of the test period using only data up to that day. Direction accuracy comes with a binomial test against a coin flip.</p>
-        <p id="volNote" hidden><b>Volatility clusters.</b> Calm weeks follow calm weeks, so how much the price will move is far more predictable than which way. The HAR model is a linear blend of the last day's, week's and month's volatility.</p>
+        <p id="volNote" hidden><b>Volatility clusters.</b> Calm weeks tend to follow calm weeks, so how much the price will move is more predictable than which way. The HAR model is a linear blend of the last day's, week's and month's volatility, refitted weekly on the previous two years. A week of daily returns is a noisy measure of volatility, so even good forecasts have a low R².</p>
         <p id="meta"></p>
       </section>
     </div>
@@ -280,14 +280,17 @@
       if (l) statCard('LSTM · next day', usd(l.MAE) + ' MAE', 'dir. ' + pct(l.DirectionAcc) + ' · ' + pText(l.DirectionP));
       if (n) statCard('Naive · next day', usd(n.MAE) + ' MAE', 'tomorrow = today');
       const har = M.volatility && M.volatility['HAR'];
-      if (har) statCard('Volatility · HAR', '−' + pct(har.VsNaive, 0) + ' error', 'vs. "same as last week"');
+      if (har && har.VsBestNaive != null) {
+        const gain = har.VsBestNaive;
+        statCard('Volatility · HAR', (gain >= 0 ? '−' : '+') + pct(Math.abs(gain), 0) + ' error', 'vs. the best naive baseline');
+      }
       for (const [name, m] of Object.entries(M.other || {})) statCard(name + ' · MAE', usd(m.MAE), 'R² ' + m.R2.toFixed(3));
 
       // Results table, one group per horizon; the best MAE in each is bold.
       const GROUPS = [
         ['one_day', 'Next day (price)', usd],
         ['seven_day', 'Next 7 days (price, every week of the test period)', usd],
-        ['volatility', 'Next-week volatility (annualized, % points)', (v) => v.toFixed(1)],
+        ['volatility', 'Next-week volatility (annualized, % points; HAR refitted weekly)', (v) => v.toFixed(1)],
         ['other', 'Other models', usd],
       ];
       const tbody = document.querySelector('#table tbody');
@@ -334,14 +337,19 @@
         c.hidden = false;
       }
       if (M.seven_day) $('fairNote').hidden = false;
-      if (har) {
-        const naive = M.volatility['Naive (last 7 days)'];
+      if (har && har.VsBestNaive != null) {
+        // Only call volatility predictable if HAR clearly beats the stronger baseline.
+        const n7 = M.volatility['Naive (last 7 days)'], n30 = M.volatility['Naive (last 30 days)'];
+        const best = n30 && n30.MAE < n7.MAE ? ['"same as last month"', n30] : ['"same as last week"', n7];
+        const good = har.VsBestNaive >= 0.05;
         const vc = $('volCallout');
+        vc.classList.toggle('good', good);
         vc.innerHTML = '<b></b> ';
-        vc.firstChild.textContent = 'Volatility is predictable.';
-        vc.append('Forecasting next week\'s volatility, the HAR model\'s error is ' + har.MAE.toFixed(1) +
-          ' points against ' + naive.MAE.toFixed(1) + ' for "next week looks like last week": ' + pct(har.VsNaive, 0) + ' lower' +
-          (M.volatility['XGBoost'] ? ', and XGBoost\'s is ' + pct(M.volatility['XGBoost'].VsNaive, 0) + ' lower.' : '.'));
+        vc.firstChild.textContent = good ? 'Volatility is partly predictable.' : 'Volatility forecasting gives only a small edge here.';
+        vc.append('Forecasting next week\'s volatility, HAR\'s error is ' + har.MAE.toFixed(1) + ' points against ' +
+          best[1].MAE.toFixed(1) + ' for the better naive baseline, ' + best[0] + ': ' +
+          (har.VsBestNaive >= 0 ? pct(har.VsBestNaive, 0) + ' lower.' : pct(-har.VsBestNaive, 0) + ' higher.'));
+        if (good) $('volTitle').textContent = 'Next-week volatility: the part that is predictable';
         $('volNote').hidden = false;
       }
     }
@@ -439,7 +447,7 @@
     const VOL_SERIES = [
       { key: 'actual', label: 'Realized', color: '--actual', width: 1.5 },
       { key: 'har', label: 'HAR forecast', color: '--accent', width: 2 },
-      { key: 'naive', label: 'Last 7 days', color: '--naive', width: 1, dash: 'dot' },
+      { key: 'naive30', label: 'Last 30 days (baseline)', color: '--naive', width: 1.2, dash: 'dot' },
     ];
     function drawVol() {
       if (!vol) return;
