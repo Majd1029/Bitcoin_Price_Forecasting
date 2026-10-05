@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitcoin Price Forecasting — Majd Aguir</title>
+  <meta name="description" content="XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, compared against a naive baseline.">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f5f7; --card: #ffffff; --card-2: #f2f2f4; --text: #1d1d1f; --muted: #6e6e73;
+      --border: rgba(0, 0, 0, 0.07); --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
+      --accent: #f7931a; --accent-2: #f59e0b; --grid: rgba(0,0,0,.07);
+      --actual: #1d1d1f; --naive: #8e8e93; --lstm: #16a34a; --kmeans: #db2777;
+      --ok: #16a34a; --bad: #dc2626; --warn-bg: #fff7ed; --warn-border: #fed7aa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0b0c; --card: #161618; --card-2: #1f1f22; --text: #f5f5f7; --muted: #a1a1a6;
+        --border: rgba(255,255,255,.08); --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+        --grid: rgba(255,255,255,.08); --actual: #e8e8ea; --naive: #8e8e93; --lstm: #4ade80; --kmeans: #f472b6;
+        --ok: #4ade80; --bad: #f87171; --warn-bg: rgba(247,147,26,.1); --warn-border: rgba(247,147,26,.3);
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; }
+    [hidden] { display: none !important; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 24px 56px; }
+
+    header { margin-bottom: 26px; }
+    h1 { font-size: clamp(28px, 4vw, 38px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+    h1 span { background: linear-gradient(120deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .sub { color: var(--muted); margin-top: 8px; font-size: 16px; max-width: 680px; }
+    h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 24px; box-shadow: var(--shadow); padding: 24px; min-width: 0; }
+    .label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+
+    .stats { display: grid; grid-template-columns: 1.3fr repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+    .stat { padding: 18px 20px; border-radius: 20px; }
+    .stat .value { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .stat .note { font-size: 13px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+    .stat .note.up { color: var(--ok); } .stat .note.down { color: var(--bad); }
+    .stat.live { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--card)), var(--card)); }
+    .stat.live .label { display: flex; align-items: center; gap: 7px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+
+    .callout { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 20px; padding: 18px 20px; margin-bottom: 16px; font-size: 15px; }
+    .callout b { font-weight: 700; }
+    .callout p + p { margin-top: 8px; color: var(--muted); }
+
+    .chart-card { padding: 20px 20px 12px; margin-bottom: 16px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 8px; }
+    .chips, .ranges { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { display: inline-flex; align-items: center; gap: 8px; font: 500 13px 'Inter', sans-serif; padding: 7px 12px; border-radius: 999px; background: var(--card-2); color: var(--text); border: 1px solid var(--border); cursor: pointer; }
+    .chip i { width: 14px; height: 3px; border-radius: 2px; background: var(--c); }
+    .chip[aria-pressed="false"] { opacity: .45; }
+    .chip:focus-visible, .range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .range { font: 600 13px 'Inter', sans-serif; padding: 7px 12px; border-radius: 10px; background: transparent; color: var(--muted); border: 1px solid transparent; cursor: pointer; }
+    .range[aria-pressed="true"] { background: var(--card-2); color: var(--text); border-color: var(--border); }
+    #chart { width: 100%; height: 480px; }
+    #resid { width: 100%; height: 260px; }
+    .chart-note { font-size: 13px; color: var(--muted); padding: 4px 4px 0; }
+
+    .grid2 { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; margin-bottom: 16px; }
+    details summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+    details summary::-webkit-details-marker { display: none; }
+    details summary::before { content: "›"; display: inline-block; transition: transform .2s; font-size: 20px; color: var(--muted); line-height: 1; }
+    details[open] summary::before { transform: rotate(90deg); }
+    details[open] summary { margin-bottom: 10px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; font-variant-numeric: tabular-nums; }
+    th, td { text-align: right; padding: 10px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th:first-child, td:first-child { text-align: left; }
+    th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    tr:last-child td { border-bottom: 0; }
+    td.best { font-weight: 700; }
+    .table-wrap { overflow-x: auto; }
+    .about p { font-size: 14px; color: var(--muted); margin-top: 10px; }
+    .about p b { color: var(--text); }
+
+    .msg { padding: 14px 16px; border-radius: 14px; font-size: 14px; background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); margin-bottom: 16px; }
+    footer { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+    footer a { text-decoration: none; font-weight: 500; }
+    footer a:hover { color: var(--text); }
+
+    @media (max-width: 1000px) { .stats { grid-template-columns: repeat(3, 1fr); } .stat.live { grid-column: 1 / -1; } .grid2 { grid-template-columns: 1fr; } }
+    @media (max-width: 560px) {
+      .wrap { padding: 24px 16px 40px; }
+      .stats { grid-template-columns: 1fr 1fr; gap: 10px; }
+      .stat { padding: 14px 16px; }
+      .stat .value { font-size: 21px; }
+      .card { border-radius: 20px; }
+      .chart-card { padding: 14px 10px 8px; }
+      #chart { height: 380px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1><span>Bitcoin</span> Price Forecasting</h1>
+      <p class="sub">XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, scored on 2023 onward against a naive baseline. Models are trained offline; this page renders the stored predictions.</p>
+    </header>
+
+    <div class="msg" id="error" hidden></div>
+
+    <section class="stats" id="stats" aria-label="Key numbers">
+      <div class="card stat live">
+        <div class="label"><span class="dot" id="liveDot"></span>BTC-USD now</div>
+        <div class="value" id="livePrice">…</div>
+        <div class="note" id="liveNote">Fetching live price</div>
+      </div>
+    </section>
+
+    <section class="callout" id="callout" hidden></section>
+
+    <section class="card chart-card" aria-label="Actual versus predicted price">
+      <div class="toolbar">
+        <div class="chips" id="chips" aria-label="Series"></div>
+        <div class="ranges" id="ranges" aria-label="Time range">
+          <button type="button" class="range" data-months="3" aria-pressed="false">3M</button>
+          <button type="button" class="range" data-months="6" aria-pressed="false">6M</button>
+          <button type="button" class="range" data-months="12" aria-pressed="false">1Y</button>
+          <button type="button" class="range" data-months="0" aria-pressed="true">All</button>
+        </div>
+      </div>
+      <div id="chart" role="img" aria-label="Line chart of actual BTC-USD close against model predictions"></div>
+      <p class="chart-note">Drag on the chart to zoom, double-click to reset. The dashed lines after the last actual close are the LSTM and KMeans 7-day forecasts.</p>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h2>Results</h2>
+        <div class="table-wrap">
+          <table id="table">
+            <thead><tr><th>Model</th><th>MAE</th><th>RMSE</th><th>R²</th><th>Direction</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card about">
+        <h2>How to read this</h2>
+        <p><b>The R² near 0.997 is an artifact.</b> Each XGBoost prediction is anchored on the previous <i>actual</i> close, so almost all the explained variance is yesterday's price, not skill. That is why a naive "tomorrow = today" baseline is shown next to it.</p>
+        <p><b>Log-returns, not prices.</b> Trees can't predict above the highest price seen in training, so XGBoost models log-returns and rebuilds the price path from them.</p>
+        <p id="meta"></p>
+      </section>
+    </div>
+
+    <section class="card">
+      <details>
+        <summary><h2>Residuals (actual − predicted)</h2></summary>
+        <div id="resid" role="img" aria-label="Residuals of each model over the selected window"></div>
+      </details>
+    </section>
+
+    <footer>
+      <span>Built by <a href="https://majd-aguir.vercel.app/">Majd Aguir</a> · Not financial advice</span>
+      <a href="https://github.com/Majd1029/Bitcoin_Price_Forecasting">Notebook &amp; source on GitHub ↗</a>
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-basic-dist-min@2.35.3/plotly-basic.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const usd = (v, d = 0) => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    // Series shown on the main chart. `col` is the CSV column; `file` says which CSV.
+    const SERIES = [
+      { key: 'actual', label: 'Actual', color: '--actual', file: 'pred', dash: 'solid', width: 2, fixed: true },
+      { key: 'xgboost', label: 'XGBoost', color: '--accent', file: 'pred', dash: 'dot', width: 2 },
+      { key: 'naive', label: 'Naive (persistence)', color: '--naive', file: 'pred', dash: 'dot', width: 1.5 },
+      { key: 'lstm_forecast', label: 'LSTM 7-day', color: '--lstm', file: 'fc', dash: 'dash', width: 2, markers: true },
+      { key: 'kmeans_forecast', label: 'KMeans+LR 7-day', color: '--kmeans', file: 'fc', dash: 'dash', width: 2, markers: true },
+    ];
+    const visible = Object.fromEntries(SERIES.map((s) => [s.key, true]));
+    let pred = null, fc = null, months = 0;
+
+    function parseCSV(text) {
+      const [head, ...rows] = text.trim().split(/\r?\n/);
+      const cols = head.split(',');
+      const out = Object.fromEntries(cols.map((c) => [c, []]));
+      for (const row of rows) {
+        row.split(',').forEach((v, i) => out[cols[i]].push(i === 0 ? v : Number(v)));
+      }
+      return out;
+    }
+    async function getData(path, kind) {
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(path + ' ' + r.status);
+      return kind === 'json' ? r.json() : parseCSV(await r.text());
+    }
+
+    // ---------------------------------------------------------- live price
+    // CoinGecko first (price + 24h change), Coinbase as a fallback (spot only).
+    async function livePrice() {
+      try {
+        const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true');
+        const d = await r.json();
+        const px = Number(d.bitcoin.usd), pct = d.bitcoin.usd_24h_change;
+        if (!px) throw new Error('no price');
+        return { px, pct: pct == null ? null : Number(pct), source: 'CoinGecko' };
+      } catch (e) {}
+      try {
+        const r = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
+        const d = await r.json();
+        const px = Number(d.data.amount);
+        if (!px) throw new Error('no price');
+        return { px, pct: null, source: 'Coinbase' };
+      } catch (e) {}
+      return null;
+    }
+    async function showLive() {
+      const live = await livePrice();
+      if (!live) {
+        $('livePrice').textContent = 'Unavailable';
+        $('liveNote').textContent = 'Live price sources unreachable. The forecasts are precomputed and unaffected.';
+        return;
+      }
+      $('liveDot').classList.add('on');
+      $('livePrice').textContent = usd(live.px);
+      const note = $('liveNote');
+      if (live.pct != null) {
+        const chg = live.px * live.pct / 100;
+        note.textContent = (chg >= 0 ? '▲ +' : '▼ −') + usd(Math.abs(chg)) + ' (' + live.pct.toFixed(2) + '%) 24h · ' + live.source;
+        note.classList.add(chg >= 0 ? 'up' : 'down');
+      } else {
+        note.textContent = 'Spot price · ' + live.source;
+      }
+    }
+
+    // ------------------------------------------------------- stats, table
+    function renderMetrics(metrics) {
+      const stats = $('stats');
+      for (const [name, m] of Object.entries(metrics)) {
+        const div = document.createElement('div');
+        div.className = 'card stat';
+        div.innerHTML = '<div class="label"></div><div class="value"></div><div class="note"></div>';
+        div.querySelector('.label').textContent = name.replace(' (persistence)', '') + ' · MAE';
+        div.querySelector('.value').textContent = usd(m.MAE);
+        div.querySelector('.note').textContent = 'R² ' + m.R2.toFixed(3) + (m.DirectionAcc != null ? ' · dir. ' + (m.DirectionAcc * 100).toFixed(1) + '%' : '');
+        stats.appendChild(div);
+      }
+
+      const best = Math.min(...Object.values(metrics).map((m) => m.MAE));
+      const tbody = document.querySelector('#table tbody');
+      for (const [name, m] of Object.entries(metrics)) {
+        const tr = document.createElement('tr');
+        const cells = [name, usd(m.MAE), usd(m.RMSE), m.R2.toFixed(3), m.DirectionAcc != null ? (m.DirectionAcc * 100).toFixed(1) + '%' : '—'];
+        cells.forEach((c, i) => {
+          const td = document.createElement('td');
+          td.textContent = c;
+          if (i === 1 && m.MAE === best) td.className = 'best';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      }
+
+      const x = metrics['XGBoost'], n = metrics['Naive (persistence)'];
+      if (x && n) {
+        const c = $('callout');
+        const diff = Math.abs(x.MAE - n.MAE);
+        c.innerHTML = '<p></p><p></p>';
+        c.firstChild.innerHTML = '<b>XGBoost does not beat a naive baseline.</b> ';
+        c.firstChild.append(
+          'Predicting each day\'s close as the previous day\'s close gives MAE ' + usd(n.MAE) +
+          '; XGBoost gives ' + usd(x.MAE) + ', a difference of ' + usd(diff) + ', in the noise. Its directional accuracy is ' +
+          (x.DirectionAcc * 100).toFixed(1) + '%, a coin flip.');
+        c.lastChild.textContent = 'This is the expected result: daily crypto returns carry little signal recoverable from lagged returns, and a model that claims otherwise usually has a leak.';
+        c.hidden = false;
+      }
+    }
+
+    function renderMeta(meta) {
+      if (!meta || !meta.ticker) return;
+      $('meta').textContent = meta.ticker + ' daily closes, ' + meta.data_start + ' to ' + meta.data_end +
+        '. Train/test split at ' + meta.train_test_split + ' (' + meta.n_train.toLocaleString() + ' train / ' +
+        meta.n_test.toLocaleString() + ' test days).';
+    }
+
+    // ------------------------------------------------------------- charts
+    function windowStart() {
+      if (!months) return null;
+      const last = new Date(pred.date[pred.date.length - 1]);
+      last.setMonth(last.getMonth() - months);
+      return last.toISOString().slice(0, 10);
+    }
+    function axisRange() {
+      const start = windowStart();
+      if (!start) return undefined;
+      const end = fc ? fc.date[fc.date.length - 1] : pred.date[pred.date.length - 1];
+      return [start, end];
+    }
+    // Plotly autoranges y over all the data, not the visible window, which
+    // flattens a 3-month view of an 8-year series. Fit y to what is shown.
+    function yRange(traces) {
+      const start = windowStart();
+      if (!start) return undefined;
+      let lo = Infinity, hi = -Infinity;
+      for (const t of traces) {
+        t.x.forEach((d, i) => {
+          if (d >= start) { lo = Math.min(lo, t.y[i]); hi = Math.max(hi, t.y[i]); }
+        });
+      }
+      if (!isFinite(lo)) return undefined;
+      const pad = (hi - lo) * 0.06 || hi * 0.02;
+      return [lo - pad, hi + pad];
+    }
+    function layout(extra) {
+      const text = css('--text'), muted = css('--muted'), grid = css('--grid');
+      return Object.assign({
+        margin: { l: 64, r: 12, t: 8, b: 32 },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { family: 'Inter, sans-serif', color: muted, size: 12 },
+        hovermode: 'x unified',
+        hoverlabel: { bgcolor: css('--card'), bordercolor: grid, font: { color: text } },
+        showlegend: false,
+        xaxis: { showgrid: false, linecolor: grid, range: axisRange() },
+        yaxis: { gridcolor: grid, zeroline: false, tickprefix: '$', separatethousands: true, autorange: true },
+      }, extra || {});
+    }
+    const config = { displayModeBar: false, responsive: true };
+
+    function mainTraces() {
+      return SERIES.filter((s) => visible[s.key]).map((s) => {
+        const src = s.file === 'pred' ? pred : fc;
+        if (!src || !src[s.key]) return null;
+        return {
+          type: 'scatter', mode: s.markers ? 'lines+markers' : 'lines', name: s.label,
+          x: src.date, y: src[s.key],
+          line: { color: css(s.color), width: s.width, dash: s.dash },
+          marker: { size: 5 },
+          hovertemplate: '%{y:$,.0f}',
+        };
+      }).filter(Boolean);
+    }
+    function residTraces() {
+      return SERIES.filter((s) => s.file === 'pred' && !s.fixed && visible[s.key] && pred[s.key]).map((s) => ({
+        type: 'scatter', mode: 'lines', name: s.label,
+        x: pred.date, y: pred.actual.map((a, i) => a - pred[s.key][i]),
+        line: { color: css(s.color), width: 1 },
+        hovertemplate: '%{y:$,.0f}',
+      }));
+    }
+    function yaxis(traces) {
+      const range = yRange(traces);
+      return { gridcolor: css('--grid'), zeroline: false, tickprefix: '$', separatethousands: true,
+               range, autorange: range ? false : true };
+    }
+    function draw() {
+      const main = mainTraces();
+      Plotly.react('chart', main, layout({ yaxis: yaxis(main) }), config);
+      const r = $('resid');
+      if (r.offsetParent) {
+        const start = windowStart();
+        const resid = residTraces();
+        Plotly.react(r, resid, layout({
+          xaxis: { showgrid: false, linecolor: css('--grid'), range: start ? [start, pred.date[pred.date.length - 1]] : undefined },
+          yaxis: Object.assign(yaxis(resid), { zeroline: true, zerolinecolor: css('--grid') }),
+        }), config);
+      }
+    }
+
+    function buildChips() {
+      const chips = $('chips');
+      for (const s of SERIES) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'chip';
+        b.style.setProperty('--c', 'var(' + s.color + ')');
+        b.innerHTML = '<i></i><span></span>';
+        b.querySelector('span').textContent = s.label;
+        b.setAttribute('aria-pressed', 'true');
+        if (s.fixed) { b.disabled = true; b.title = 'Always shown'; b.style.cursor = 'default'; }
+        b.addEventListener('click', () => {
+          visible[s.key] = !visible[s.key];
+          b.setAttribute('aria-pressed', String(visible[s.key]));
+          draw();
+        });
+        chips.appendChild(b);
+      }
+    }
+
+    document.querySelectorAll('.range').forEach((b) => b.addEventListener('click', () => {
+      months = Number(b.dataset.months);
+      document.querySelectorAll('.range').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      draw();
+    }));
+    document.querySelector('details').addEventListener('toggle', draw);
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+
+    async function init() {
+      showLive();
+      try {
+        const [p, f, metrics, meta] = await Promise.all([
+          getData('data/predictions.csv'),
+          getData('data/lstm_forecast.csv').catch(() => null),
+          getData('data/metrics.json', 'json'),
+          getData('data/meta.json', 'json').catch(() => null),
+        ]);
+        pred = p; fc = f;
+        renderMetrics(metrics);
+        renderMeta(meta);
+        buildChips();
+        if (window.Plotly) draw();
+        else throw new Error('The chart library failed to load.');
+      } catch (err) {
+        $('error').textContent = 'Could not load the forecast data: ' + err.message;
+        $('error').hidden = false;
+      }
+    }
+    init();
+  </script>
+</body>
+</html>
