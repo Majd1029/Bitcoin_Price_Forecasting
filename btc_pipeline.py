@@ -38,7 +38,7 @@ window is used for fitting, tuning or scaling:
   * XGBoost is tuned with TimeSeriesSplit, so each fold trains on the past
     and validates on what follows. Plain k-fold would let it tune on the future.
   * The LSTM models returns, with scaling fitted on the training years only.
-  * 7-day forecasts (LSTM, KMeans + trend) are scored by rolling origin: every
+  * 7-day LSTM forecasts are scored by rolling origin: every
     7 days through the test window, forecast the next 7 from data up to that
     day only, against a "price stays flat" baseline.
 
@@ -59,11 +59,9 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from scipy.stats import binomtest
-from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
-from sklearn.preprocessing import MinMaxScaler
 
 OUT = Path(__file__).parent / "web" / "data"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -224,26 +222,13 @@ print("scoring 7-day forecasts by rolling origin ...")
 close = df["Close"].values
 
 
-def kmeans_trend(history):
-    """The notebook's method: cluster price levels, then extrapolate a linear
-    trend through the last 30 closes in the latest cluster. Fitted on history
-    only."""
-    scaled = MinMaxScaler().fit_transform(history.reshape(-1, 1))
-    labels = KMeans(n_clusters=5, random_state=SEED, n_init=4).fit_predict(scaled)
-    recent = history[labels == labels[-1]][-30:]
-    coeffs = np.polyfit(np.arange(len(recent)), recent, 1)
-    return np.polyval(coeffs, np.arange(len(recent), len(recent) + HORIZON))
-
-
 origins = np.arange(split_pos - 1, len(df) - HORIZON, HORIZON)
 truth7 = np.concatenate([close[o + 1:o + 1 + HORIZON] for o in origins])
 lstm7 = np.concatenate([close[o] * np.exp(np.cumsum(r))
                         for o, r in zip(origins, lstm_returns(origins))])
-kmeans7 = np.concatenate([kmeans_trend(close[:o + 1]) for o in origins])
 naive7 = np.repeat(close[origins], HORIZON)
 seven_day = {
     "LSTM": score(truth7, lstm7),
-    "KMeans+LR": score(truth7, kmeans7),
     "Naive (flat)": score(truth7, naive7),
 }
 for name, m in seven_day.items():
@@ -296,7 +281,6 @@ future_dates = pd.date_range(last + pd.Timedelta(days=1), periods=HORIZON, freq=
 pd.DataFrame({
     "date": future_dates.strftime("%Y-%m-%d"),
     "lstm_forecast": close[-1] * np.exp(np.cumsum(lstm_returns([len(df) - 1])[0])),
-    "kmeans_forecast": kmeans_trend(close),
 }).to_csv(OUT / "lstm_forecast.csv", index=False)
 
 pd.DataFrame({

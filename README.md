@@ -2,7 +2,7 @@
 
 **[Try the live demo](https://bitcoinpriceforecasting-web.vercel.app)** — interactive actual-vs-predicted chart with the naive baseline shown alongside each model.
 
-XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes (2018 - today),
+XGBoost and an LSTM on BTC-USD daily closes (2018 - today),
 plus a forecast of next week's volatility.
 
 - **Live demo:** a static page on Vercel (`web/index.html`), with a live BTC price from CoinGecko
@@ -17,7 +17,7 @@ scaling, and every model is compared with the naive baseline for its horizon.
 | Question | Models | Baseline | Scored by |
 |---|---|---|---|
 | Tomorrow's price | XGBoost, LSTM (both on log-returns) | tomorrow = today | MAE, RMSE, R², directional accuracy with a binomial test vs. a coin flip |
-| Price over the next 7 days | LSTM, KMeans + linear trend | price stays flat | rolling origin: every 7 days, forecast the next 7 using only data up to that day |
+| Price over the next 7 days | LSTM | price stays flat | rolling origin: every 7 days, forecast the next 7 using only data up to that day |
 | Next week's volatility | HAR, XGBoost | next week is as volatile as last week | MAE, RMSE, R² on annualized realized volatility |
 
 Details that matter:

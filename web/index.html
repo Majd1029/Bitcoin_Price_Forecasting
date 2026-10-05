@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bitcoin Price Forecasting — Majd Aguir</title>
-  <meta name="description" content="XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, compared against a naive baseline.">
+  <meta name="description" content="XGBoost and an LSTM on BTC-USD daily closes, compared against a naive baseline, plus a next-week volatility forecast.">
   <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,14 +15,14 @@
       --bg: #f5f5f7; --card: #ffffff; --card-2: #f2f2f4; --text: #1d1d1f; --muted: #6e6e73;
       --border: rgba(0, 0, 0, 0.07); --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
       --accent: #f7931a; --accent-2: #f59e0b; --grid: rgba(0,0,0,.07);
-      --actual: #1d1d1f; --naive: #8e8e93; --lstm: #16a34a; --kmeans: #db2777; --lstm1: #0284c7; --good-bg: #f0fdf4; --good-border: #bbf7d0;
+      --actual: #1d1d1f; --naive: #8e8e93; --lstm: #16a34a; --lstm1: #0284c7; --good-bg: #f0fdf4; --good-border: #bbf7d0;
       --ok: #16a34a; --bad: #dc2626; --warn-bg: #fff7ed; --warn-border: #fed7aa;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #0b0b0c; --card: #161618; --card-2: #1f1f22; --text: #f5f5f7; --muted: #a1a1a6;
         --border: rgba(255,255,255,.08); --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-        --grid: rgba(255,255,255,.08); --actual: #e8e8ea; --naive: #8e8e93; --lstm: #4ade80; --kmeans: #f472b6; --lstm1: #38bdf8; --good-bg: rgba(22,163,74,.1); --good-border: rgba(74,222,128,.3);
+        --grid: rgba(255,255,255,.08); --actual: #e8e8ea; --naive: #8e8e93; --lstm: #4ade80; --lstm1: #38bdf8; --good-bg: rgba(22,163,74,.1); --good-border: rgba(74,222,128,.3);
         --ok: #4ade80; --bad: #f87171; --warn-bg: rgba(247,147,26,.1); --warn-border: rgba(247,147,26,.3);
       }
     }
@@ -113,7 +113,7 @@
   <div class="wrap">
     <header>
       <h1><span>Bitcoin</span> Price Forecasting</h1>
-      <p class="sub">XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes, plus a next-week volatility forecast. Every model is scored on 2023 onward against the naive baseline for its horizon. Models are trained offline; this page renders the stored predictions.</p>
+      <p class="sub">XGBoost and an LSTM on BTC-USD daily closes, plus a next-week volatility forecast. Every model is scored on 2023 onward against the naive baseline for its horizon. Models are trained offline; this page renders the stored predictions.</p>
     </header>
 
     <div class="msg" id="error" hidden></div>
@@ -139,7 +139,7 @@
         </div>
       </div>
       <div id="chart" role="img" aria-label="Line chart of actual BTC-USD close against model predictions"></div>
-      <p class="chart-note">Drag on the chart to zoom, double-click to reset. The dashed lines after the last actual close are the LSTM and KMeans 7-day forecasts.</p>
+      <p class="chart-note">Drag on the chart to zoom, double-click to reset. The dashed line after the last actual close is the LSTM's 7-day forecast.</p>
     </section>
 
     <section class="card vol-card" id="volSection" hidden aria-label="Next-week volatility forecast">
@@ -195,7 +195,6 @@
       { key: 'lstm', label: 'LSTM', color: '--lstm1', file: 'pred', dash: 'dot', width: 1.5 },
       { key: 'naive', label: 'Naive (persistence)', color: '--naive', file: 'pred', dash: 'dot', width: 1.5 },
       { key: 'lstm_forecast', label: 'LSTM 7-day', color: '--lstm', file: 'fc', dash: 'dash', width: 2, markers: true },
-      { key: 'kmeans_forecast', label: 'KMeans+LR 7-day', color: '--kmeans', file: 'fc', dash: 'dash', width: 2, markers: true },
     ];
     const visible = Object.fromEntries(SERIES.map((s) => [s.key, true]));
     let pred = null, fc = null, vol = null, months = 0;
@@ -258,7 +257,7 @@
     // is a flat {model: metrics} object; read it as the 1-day group.
     function normalize(metrics) {
       if (metrics.one_day) return metrics;
-      const { XGBoost, 'Naive (persistence)': naive, ...rest } = metrics;
+      const { XGBoost, 'Naive (persistence)': naive, 'KMeans+LR': _dropped, ...rest } = metrics;
       return { one_day: { XGBoost, 'Naive (persistence)': naive }, other: rest };
     }
     const pct = (v, d = 1) => (v * 100).toFixed(d) + '%';
