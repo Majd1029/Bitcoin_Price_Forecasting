@@ -95,7 +95,7 @@ To retrain the models and refresh the data:
 
 ```bash
 pip install -r requirements.txt
-python btc_pipeline.py          # rewrites web/data/ (downloads from Yahoo Finance)
+python btc_pipeline.py          # rewrites web/data/ (Yahoo Finance, or Binance if Yahoo fails)
 BTC_CSV=prices.csv python btc_pipeline.py   # or from a CSV with date and Close columns
 ```
 

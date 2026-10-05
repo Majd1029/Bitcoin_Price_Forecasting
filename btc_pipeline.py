@@ -73,20 +73,60 @@ SEED = 42
 
 
 # ---------------------------------------------------------------- data
+def from_yahoo():
+    import yfinance as yf
+
+    prices = yf.download(TICKER, start=START, auto_adjust=True, progress=False)
+    if isinstance(prices.columns, pd.MultiIndex):   # yfinance returns (field, ticker)
+        prices.columns = prices.columns.get_level_values(0)
+    return prices[["Close"]] if "Close" in prices else pd.DataFrame(columns=["Close"])
+
+
+def from_binance():
+    """Daily BTC/USDT closes from Binance's public API (no key), 1000 days per
+    request. USDT tracks the dollar closely enough for daily closes."""
+    import urllib.request
+
+    rows, start_ms = [], int(pd.Timestamp(START).timestamp() * 1000)
+    while True:
+        url = ("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d"
+               f"&startTime={start_ms}&limit=1000")
+        with urllib.request.urlopen(url, timeout=30) as r:
+            batch = json.load(r)
+        rows += batch
+        if len(batch) < 1000:
+            break
+        start_ms = batch[-1][0] + 1
+    # each kline: [open time, open, high, low, close, ...]; drop today's unfinished day
+    prices = pd.DataFrame({"Close": [float(k[4]) for k in rows]},
+                          index=pd.to_datetime([k[0] for k in rows], unit="ms"))
+    return prices[prices.index < pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()]
+
+
 def load_prices():
     csv = os.getenv("BTC_CSV")
     if csv:
         print(f"reading {csv} ...")
         prices = pd.read_csv(csv, parse_dates=["date"], index_col="date")[["Close"]]
     else:
-        import yfinance as yf
-
-        print("downloading BTC-USD ...")
-        prices = yf.download(TICKER, start=START, auto_adjust=True, progress=False)
-        if isinstance(prices.columns, pd.MultiIndex):   # yfinance >= 0.2.51
-            prices.columns = prices.columns.get_level_values(0)
-        prices = prices[["Close"]]
-    return prices.dropna().sort_index()
+        prices = pd.DataFrame(columns=["Close"])
+        for name, source in (("Yahoo Finance", from_yahoo), ("Binance", from_binance)):
+            print(f"downloading BTC-USD from {name} ...")
+            try:
+                prices = source()
+            except Exception as e:
+                print(f"  {name} failed: {e}")
+                continue
+            if len(prices):
+                break
+            print(f"  {name} returned no data")
+    prices = prices.dropna().sort_index()
+    if len(prices) < 1000:
+        raise SystemExit(
+            f"Only {len(prices)} daily prices loaded; need several years. If Yahoo "
+            "failed, upgrade yfinance (pip install -U yfinance), or pass a CSV with "
+            "date and Close columns: BTC_CSV=prices.csv python btc_pipeline.py")
+    return prices
 
 
 def score(true, pred):
