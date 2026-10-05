@@ -4,9 +4,9 @@
 
 XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes (2018 - today).
 
-- **Live demo:** Streamlit Community Cloud, deployed from `app.py`
+- **Live demo:** a static page on Vercel (`web/index.html`), with a live BTC price from CoinGecko
 - **Notebook:** original exploration and model development
-- **`btc_pipeline.py`:** trains offline and exports `data/`; the app only renders
+- **`btc_pipeline.py`:** trains offline and exports `web/data/`; the page only renders
 
 ## Results, and an honest reading of them
 
@@ -61,13 +61,27 @@ It did not, however, make the model useful, per the table above.
 - `yfinance` now returns MultiIndex columns; the pipeline flattens them. The
   notebook's `df['Close']` breaks on a fresh run without this.
 - Prophet is omitted: it needs a C++ toolchain at install time and would bloat
-  the deployment for one extra series.
+  the pipeline for one extra series.
 - Not financial advice. A modelling exercise on historical data.
 
 ## Run locally
 
+The page is static, so any web server works:
+
+```bash
+cd web
+python -m http.server 8000      # then open http://localhost:8000
+```
+
+To retrain the models and refresh the data:
+
 ```bash
 pip install -r requirements.txt
-python btc_pipeline.py     # regenerate data/ (optional)
-streamlit run app.py
+python btc_pipeline.py          # rewrites web/data/
 ```
+
+## Deploying
+
+On vercel.com, **Add New → Project**, import this repository, set **Root
+Directory** to `web`, Framework Preset **Other**, no build command. Every push
+to `main` redeploys.

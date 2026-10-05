@@ -1,10 +1,10 @@
 """Reproduce the Bitcoin_Price_Forecasting notebook's models and export the
-artifacts the Streamlit app reads. Run once; commit data/.
+artifacts the demo page (web/index.html) reads. Run once; commit web/data/.
 
 Differences from the notebook, all deliberate:
   * Data runs to today rather than 2025-05-31, so the demo is not stale.
-  * Prophet is omitted — it needs a C++ toolchain to build on Windows and would
-    also bloat the Streamlit Cloud image. The app treats it as optional.
+  * Prophet is omitted — it needs a C++ toolchain to build on Windows and adds
+    a heavy dependency for one extra series.
   * yfinance now returns MultiIndex columns; they are flattened here. The
     notebook's `df['Close']` would break on a fresh run without this.
   * XGBoost predicts LOG-RETURNS, not absolute price.
@@ -44,8 +44,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.preprocessing import MinMaxScaler
 
-OUT = Path("btc_data")
-OUT.mkdir(exist_ok=True)
+OUT = Path(__file__).parent / "web" / "data"
+OUT.mkdir(parents=True, exist_ok=True)
 
 TICKER, START, SPLIT = "BTC-USD", "2018-01-01", "2023-01-01"
 SEQ_LEN, HORIZON = 60, 7
