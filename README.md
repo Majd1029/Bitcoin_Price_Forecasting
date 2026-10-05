@@ -1,6 +1,6 @@
 # Bitcoin Price Forecasting
 
-**[Try the live demo](https://majd-btc-forecast.streamlit.app)** — interactive actual-vs-predicted chart with the naive baseline shown alongside each model.
+**[Try the live demo](https://bitcoinpriceforecasting-web.vercel.app)** — interactive actual-vs-predicted chart with the naive baseline shown alongside each model.
 
 XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes (2018 - today).
 
