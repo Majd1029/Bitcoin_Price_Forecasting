@@ -18,7 +18,7 @@ scaling, and every model is compared with the naive baseline for its horizon.
 |---|---|---|---|
 | Tomorrow's price | XGBoost, LSTM (both on log-returns) | tomorrow = today | MAE, RMSE, R², directional accuracy with a binomial test vs. a coin flip |
 | Price over the next 7 days | LSTM | price stays flat | rolling origin: every 7 days, forecast the next 7 using only data up to that day |
-| Next week's volatility | HAR, XGBoost | next week is as volatile as last week | MAE, RMSE, R² on annualized realized volatility |
+| Next week's volatility | HAR, refitted weekly on the previous 2 years | as volatile as last week; as volatile as last month | MAE, RMSE, R² on annualized realized volatility |
 
 Details that matter:
 
@@ -26,7 +26,10 @@ Details that matter:
   validates on what follows. Plain k-fold cross-validation would tune on the future.
 - The LSTM's scaling is fitted on the training years only.
 - HAR (Corsi, 2009) is a linear model of the last day's, week's and month's
-  volatility: simple, and a standard benchmark in volatility forecasting.
+  volatility: simple, and a standard benchmark in volatility forecasting. It is
+  refitted every week on a rolling 2-year window. Fitted once on 2018-2022, it did
+  no better than the baselines: those years were far more volatile and include
+  crash days (-46% on 2020-03-12) that skew a one-off fit.
 
 The latest numbers are on the live demo and in `web/data/metrics.json`.
 
@@ -45,10 +48,12 @@ This is the expected result. Daily crypto returns carry little signal
 recoverable from lagged returns, and a model that says otherwise usually has a
 leak.
 
-**Volatility is a different story.** Volatility clusters, with calm weeks
-following calm weeks, so how much the price will move is far more predictable
-than which way. The HAR model forecasts next week's volatility clearly better
-than the naive baseline. That contrast, not a price prediction, is the finding.
+**Volatility is a different question.** Volatility clusters, with calm weeks
+tending to follow calm weeks, so how much the price will move is more
+predictable than which way. HAR is scored against the better of two naive
+baselines; the demo states the size of its edge rather than assuming one. A
+week of daily returns is a noisy measure of volatility, so R² stays low even
+when the forecast helps.
 
 ## The extrapolation bug this replaced
 

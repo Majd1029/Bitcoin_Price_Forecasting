@@ -45,8 +45,14 @@ window is used for fitting, tuning or scaling:
 Volatility. Which way the price moves is close to unpredictable; how much it
 moves is not. Volatility clusters (calm weeks follow calm weeks), so next
 week's realized volatility is forecast too, with a HAR model (linear in daily,
-weekly and monthly realized volatility; Corsi 2009) and XGBoost, against the
-baseline "next week is as volatile as last week".
+weekly and monthly realized volatility; Corsi 2009), against two baselines:
+"as volatile as last week" and "as volatile as last month".
+
+HAR is refitted every 7 days on a rolling 2-year window, using only rows whose
+7-day target was already known on the forecast day. Fitting it once on 2018-2022
+does not transfer: those years were far more volatile and include crash days
+(e.g. -46% on 2020-03-12) that pull a fixed fit towards high forecasts, and on
+the real data that left it no better than the baselines.
 """
 import json
 import os
@@ -275,35 +281,32 @@ for name, m in seven_day.items():
     print(f"  7-day {name:20} {m}")
 
 # ---------------------------------------------------------- volatility
-print("forecasting next-week volatility ...")
+print("forecasting next-week volatility (HAR, weekly refit) ...")
 VOL_FEATURES = ["RV_1", "RV_7", "RV_30"]
-# a training row's target covers t+1..t+7, so stop HORIZON days before SPLIT
-vol_train = df[df.index < pd.Timestamp(SPLIT) - pd.Timedelta(days=HORIZON)].dropna(subset=["RV_next7"])
-vol_test = test.dropna(subset=["RV_next7"])
+VOL_WINDOW = pd.Timedelta(days=730)
+vol_rows = df.dropna(subset=["RV_next7"])
+vol_test = vol_rows[vol_rows.index >= SPLIT]
 
-har = LinearRegression().fit(vol_train[VOL_FEATURES], vol_train["RV_next7"])
-har_pred = har.predict(vol_test[VOL_FEATURES])
-
-vol_xgb_features = VOL_FEATURES + ["Ret_Lag1", "Ret_Mean_7", "Dayofweek"]
-vol_search = RandomizedSearchCV(
-    xgb.XGBRegressor(objective="reg:squarederror", random_state=SEED),
-    {"learning_rate": [0.03, 0.1], "max_depth": [2, 3, 4],
-     "n_estimators": [100, 200, 400], "subsample": [0.8, 1.0]},
-    n_iter=8, cv=TimeSeriesSplit(n_splits=5), scoring="neg_mean_absolute_error",
-    random_state=SEED, n_jobs=-1, verbose=0,
-)
-vol_search.fit(vol_train[vol_xgb_features], vol_train["RV_next7"])
-vol_xgb_pred = vol_search.best_estimator_.predict(vol_test[vol_xgb_features])
-vol_naive = vol_test["RV_7"].values     # "next week looks like last week"
+har_pred = np.empty(len(vol_test))
+for i in range(0, len(vol_test), HORIZON):
+    day = vol_test.index[i]
+    # targets cover t+1..t+7, so a row is usable once t+7 is in the past
+    hist = vol_rows[(vol_rows.index <= day - pd.Timedelta(days=HORIZON + 1))
+                    & (vol_rows.index > day - VOL_WINDOW)]
+    har = LinearRegression().fit(hist[VOL_FEATURES], hist["RV_next7"])
+    block = vol_test.iloc[i:i + HORIZON]
+    har_pred[i:i + len(block)] = har.predict(block[VOL_FEATURES])
 
 vol_true = vol_test["RV_next7"].values
+vol_naive7 = vol_test["RV_7"].values    # "next week looks like last week"
+vol_naive30 = vol_test["RV_30"].values  # "next week looks like last month"
 volatility = {
     "HAR": score(vol_true, har_pred),
-    "XGBoost": score(vol_true, vol_xgb_pred),
-    "Naive (last 7 days)": score(vol_true, vol_naive),
+    "Naive (last 7 days)": score(vol_true, vol_naive7),
+    "Naive (last 30 days)": score(vol_true, vol_naive30),
 }
-for name in ("HAR", "XGBoost"):
-    volatility[name]["VsNaive"] = 1 - volatility[name]["MAE"] / volatility["Naive (last 7 days)"]["MAE"]
+best_naive = min(volatility["Naive (last 7 days)"]["MAE"], volatility["Naive (last 30 days)"]["MAE"])
+volatility["HAR"]["VsBestNaive"] = 1 - volatility["HAR"]["MAE"] / best_naive
 for name, m in volatility.items():
     print(f"  vol   {name:20} {m}")
 
@@ -327,8 +330,8 @@ pd.DataFrame({
     "date": vol_test.index.strftime("%Y-%m-%d"),
     "actual": vol_true,
     "har": har_pred,
-    "xgboost": vol_xgb_pred,
-    "naive": vol_naive,
+    "naive7": vol_naive7,
+    "naive30": vol_naive30,
 }).round(3).to_csv(OUT / "volatility.csv", index=False)
 
 (OUT / "metrics.json").write_text(json.dumps(
@@ -343,8 +346,9 @@ pd.DataFrame({
     "n_origins_7day": int(len(origins)),
     "xgb_best_params": {k: (v.item() if hasattr(v, "item") else v)
                         for k, v in search.best_params_.items()},
-    "har_coefficients": dict(zip(["intercept"] + VOL_FEATURES,
-                                 [float(har.intercept_)] + [float(c) for c in har.coef_])),
+    "har_coefficients_latest": dict(zip(["intercept"] + VOL_FEATURES,
+                                        [float(har.intercept_)] + [float(c) for c in har.coef_])),
+    "har_refit": "every 7 days on a rolling 2-year window",
     "target": "log-return, price path reconstructed from previous actual close",
     "note": ("All models are scored on the same held-out window against the "
              "baseline for their horizon; tuning uses time-series CV and scaling "
