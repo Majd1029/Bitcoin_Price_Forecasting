@@ -2,35 +2,53 @@
 
 **[Try the live demo](https://bitcoinpriceforecasting-web.vercel.app)** — interactive actual-vs-predicted chart with the naive baseline shown alongside each model.
 
-XGBoost, an LSTM and a KMeans trend model on BTC-USD daily closes (2018 - today).
+XGBoost and an LSTM on BTC-USD daily closes (2018 - today),
+plus a forecast of next week's volatility.
 
 - **Live demo:** a static page on Vercel (`web/index.html`), with a live BTC price from CoinGecko
 - **Notebook:** original exploration and model development
 - **`btc_pipeline.py`:** trains offline and exports `web/data/`; the page only renders
 
+## How the models are evaluated
+
+Test window: 2023-01-01 onward. Nothing from it is used for fitting, tuning or
+scaling, and every model is compared with the naive baseline for its horizon.
+
+| Question | Models | Baseline | Scored by |
+|---|---|---|---|
+| Tomorrow's price | XGBoost, LSTM (both on log-returns) | tomorrow = today | MAE, RMSE, R², directional accuracy with a binomial test vs. a coin flip |
+| Price over the next 7 days | LSTM | price stays flat | rolling origin: every 7 days, forecast the next 7 using only data up to that day |
+| Next week's volatility | HAR, XGBoost | next week is as volatile as last week | MAE, RMSE, R² on annualized realized volatility |
+
+Details that matter:
+
+- XGBoost is tuned with `TimeSeriesSplit`, so each fold trains on the past and
+  validates on what follows. Plain k-fold cross-validation would tune on the future.
+- The LSTM's scaling is fitted on the training years only.
+- HAR (Corsi, 2009) is a linear model of the last day's, week's and month's
+  volatility: simple, and a standard benchmark in volatility forecasting.
+
+The latest numbers are on the live demo and in `web/data/metrics.json`.
+
 ## Results, and an honest reading of them
 
-Test window 2023-01-01 onward, 1361 days.
+**On price, no model beats the naive baseline.** Predicting each day's close as
+the previous day's close is as accurate as XGBoost or the LSTM, and their
+directional accuracy is statistically indistinguishable from a coin flip.
 
-| Model | MAE | RMSE | R² | Directional accuracy |
-|---|---|---|---|---|
-| XGBoost (log-returns) | $1,133 | $1,699 | 0.9966 | **49.9%** |
-| **Naive persistence** | **$1,130** | **$1,697** | **0.9966** | — |
-| LSTM (7-day, scaled) | $2,852 | $4,040 | 0.8465 | — |
-| KMeans + linear trend | $5,391 | $6,547 | -1.974 | — |
-
-**XGBoost does not beat the naive baseline.** Predicting each day's close as the
-previous day's close scores marginally better. Directional accuracy is 49.9% —
-a coin flip.
-
-The R² of 0.9966 looks impressive and means almost nothing. Each prediction is
+The R² near 0.997 looks impressive and means almost nothing. Each prediction is
 anchored on the previous *actual* close, so nearly all the explained variance is
 yesterday's price rather than model skill. Any one-step-ahead price model scores
 like this, which is exactly why the persistence baseline is reported next to it.
 
 This is the expected result. Daily crypto returns carry little signal
 recoverable from lagged returns, and a model that says otherwise usually has a
-leak. The finding is the deliverable.
+leak.
+
+**Volatility is a different story.** Volatility clusters, with calm weeks
+following calm weeks, so how much the price will move is far more predictable
+than which way. The HAR model forecasts next week's volatility clearly better
+than the naive baseline. That contrast, not a price prediction, is the finding.
 
 ## The extrapolation bug this replaced
 
@@ -77,7 +95,8 @@ To retrain the models and refresh the data:
 
 ```bash
 pip install -r requirements.txt
-python btc_pipeline.py          # rewrites web/data/
+python btc_pipeline.py          # rewrites web/data/ (downloads from Yahoo Finance)
+BTC_CSV=prices.csv python btc_pipeline.py   # or from a CSV with date and Close columns
 ```
 
 ## Deploying

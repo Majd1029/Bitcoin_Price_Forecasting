@@ -1,6 +1,9 @@
 """Reproduce the Bitcoin_Price_Forecasting notebook's models and export the
 artifacts the demo page (web/index.html) reads. Run once; commit web/data/.
 
+    python btc_pipeline.py                      # downloads BTC-USD from Yahoo
+    BTC_CSV=prices.csv python btc_pipeline.py   # or reads a CSV (date, Close)
+
 Differences from the notebook, all deliberate:
   * Data runs to today rather than 2025-05-31, so the demo is not stale.
   * Prophet is omitted — it needs a C++ toolchain to build on Windows and adds
@@ -26,7 +29,24 @@ Because that reconstruction is anchored on the previous ACTUAL close, it is a
 one-step-ahead forecast and will score a high R2 almost mechanically. A naive
 persistence baseline (C_hat[t] = C[t-1]) is therefore computed too: that is the
 number XGBoost has to beat for any of this to mean anything. Directional
-accuracy is reported for the same reason.
+accuracy is reported for the same reason, with a binomial test against a coin
+flip.
+
+Evaluation rules. Every model is scored on the same held-out window (from
+SPLIT onward) against the baseline for its horizon, and nothing from that
+window is used for fitting, tuning or scaling:
+  * XGBoost is tuned with TimeSeriesSplit, so each fold trains on the past
+    and validates on what follows. Plain k-fold would let it tune on the future.
+  * The LSTM models returns, with scaling fitted on the training years only.
+  * 7-day LSTM forecasts are scored by rolling origin: every
+    7 days through the test window, forecast the next 7 from data up to that
+    day only, against a "price stays flat" baseline.
+
+Volatility. Which way the price moves is close to unpredictable; how much it
+moves is not. Volatility clusters (calm weeks follow calm weeks), so next
+week's realized volatility is forecast too, with a HAR model (linear in daily,
+weekly and monthly realized volatility; Corsi 2009) and XGBoost, against the
+baseline "next week is as volatile as last week".
 """
 import json
 import os
@@ -38,24 +58,46 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-import yfinance as yf
-from sklearn.cluster import KMeans
+from scipy.stats import binomtest
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 
 OUT = Path(__file__).parent / "web" / "data"
 OUT.mkdir(parents=True, exist_ok=True)
 
 TICKER, START, SPLIT = "BTC-USD", "2018-01-01", "2023-01-01"
 SEQ_LEN, HORIZON = 60, 7
+ANNUALIZE = np.sqrt(365) * 100   # daily log-return std -> annualized %, crypto trades every day
+SEED = 42
+
 
 # ---------------------------------------------------------------- data
-print("downloading BTC-USD ...")
-df = yf.download(TICKER, start=START, auto_adjust=True, progress=False)
-if isinstance(df.columns, pd.MultiIndex):           # yfinance >= 0.2.51
-    df.columns = df.columns.get_level_values(0)
-df = df[["Close"]].dropna()
+def load_prices():
+    csv = os.getenv("BTC_CSV")
+    if csv:
+        print(f"reading {csv} ...")
+        prices = pd.read_csv(csv, parse_dates=["date"], index_col="date")[["Close"]]
+    else:
+        import yfinance as yf
+
+        print("downloading BTC-USD ...")
+        prices = yf.download(TICKER, start=START, auto_adjust=True, progress=False)
+        if isinstance(prices.columns, pd.MultiIndex):   # yfinance >= 0.2.51
+            prices.columns = prices.columns.get_level_values(0)
+        prices = prices[["Close"]]
+    return prices.dropna().sort_index()
+
+
+def score(true, pred):
+    return {
+        "MAE": float(mean_absolute_error(true, pred)),
+        "RMSE": float(np.sqrt(mean_squared_error(true, pred))),
+        "R2": float(r2_score(true, pred)),
+    }
+
+
+df = load_prices()
 print(f"  {len(df)} rows, {df.index.min().date()} -> {df.index.max().date()}")
 
 # ------------------------------------------------------------ features
@@ -71,11 +113,17 @@ df["Ret_Mean_30"] = df["LogRet"].shift(1).rolling(30).mean()
 df["Ret_Std_7"] = df["LogRet"].shift(1).rolling(7).std()
 df["Ret_Std_30"] = df["LogRet"].shift(1).rolling(30).std()
 df["PrevClose"] = df["Close"].shift(1)
-df = df.dropna()
 
-df["Year"] = df.index.year
+# volatility features, all known at the close of day t
+df["RV_1"] = df["LogRet"].abs() * ANNUALIZE
+df["RV_7"] = df["LogRet"].rolling(7).std() * ANNUALIZE
+df["RV_30"] = df["LogRet"].rolling(30).std() * ANNUALIZE
+# volatility target: realized volatility over the NEXT 7 days (t+1 .. t+7)
+df["RV_next7"] = df["LogRet"][::-1].rolling(HORIZON).std()[::-1].shift(-1) * ANNUALIZE
+
+df = df.dropna(subset=[c for c in df.columns if c != "RV_next7"])
+
 df["Month"] = df.index.month
-df["Day"] = df.index.day
 df["Dayofweek"] = df.index.dayofweek
 df["Is_weekend"] = (df.index.dayofweek >= 5).astype(int)
 
@@ -83,138 +131,183 @@ FEATURES = ([f"Ret_Lag{l}" for l in (1, 2, 3, 7, 14, 30)]
             + ["Ret_Mean_7", "Ret_Mean_30", "Ret_Std_7", "Ret_Std_30",
                "Month", "Dayofweek", "Is_weekend"])
 
-train = df.loc[df.index < SPLIT]
-test = df.loc[df.index >= SPLIT]
-X_train, y_train = train[FEATURES], train["LogRet"]
-X_test, y_test = test[FEATURES], test["Close"]
+is_train = df.index < SPLIT
+split_pos = int(is_train.sum())          # first test row
+train, test = df[is_train], df[~is_train]
 print(f"  train {len(train)} / test {len(test)}")
+prev = test["PrevClose"].values
+actual = test["Close"].values
 
 # ------------------------------------------------------------- xgboost
-print("tuning XGBoost ...")
+print("tuning XGBoost (time-series CV) ...")
 search = RandomizedSearchCV(
-    xgb.XGBRegressor(objective="reg:squarederror"),
+    xgb.XGBRegressor(objective="reg:squarederror", random_state=SEED),
     {
         "learning_rate": [0.01, 0.05, 0.1],
-        "max_depth": [4, 6, 8],
-        "n_estimators": [50, 100, 150],
+        "max_depth": [2, 3, 4, 6],
+        "n_estimators": [50, 100, 200],
         "subsample": [0.7, 0.8, 1.0],
         "colsample_bytree": [0.7, 0.8, 1.0],
     },
-    n_iter=10, cv=5, random_state=42, n_jobs=-1, verbose=0,
+    n_iter=15, cv=TimeSeriesSplit(n_splits=5), scoring="neg_mean_absolute_error",
+    random_state=SEED, n_jobs=-1, verbose=0,
 )
-search.fit(X_train, y_train)
-best = search.best_estimator_
-xgb_ret = best.predict(X_test)
-# rebuild the price path from predicted returns
-xgb_pred = test["PrevClose"].values * np.exp(xgb_ret)
-naive_pred = test["PrevClose"].values          # persistence baseline
+search.fit(train[FEATURES], train["LogRet"])
+xgb_ret = search.best_estimator_.predict(test[FEATURES])
+xgb_pred = prev * np.exp(xgb_ret)       # rebuild the price path from returns
+naive_pred = prev                       # persistence baseline
 print(f"  best params: {search.best_params_}")
 
 
-def score(true, pred):
-    return {
-        "MAE": float(mean_absolute_error(true, pred)),
-        "RMSE": float(np.sqrt(mean_squared_error(true, pred))),
-        "R2": float(r2_score(true, pred)),
-    }
+def direction(pred_prices):
+    """Share of days where the predicted move has the right sign, and a one-sided
+    binomial test of that share against a coin flip. Flat days are skipped."""
+    true_sign, pred_sign = np.sign(actual - prev), np.sign(pred_prices - prev)
+    keep = (true_sign != 0) & (pred_sign != 0)
+    hits, n = int((true_sign[keep] == pred_sign[keep]).sum()), int(keep.sum())
+    return {"DirectionAcc": hits / n,
+            "DirectionP": float(binomtest(hits, n, 0.5, alternative="greater").pvalue)}
 
-
-def direction_acc(true_prices, pred_prices, prev):
-    return float((np.sign(np.asarray(true_prices) - prev)
-                  == np.sign(np.asarray(pred_prices) - prev)).mean())
-
-prev = test["PrevClose"].values
-metrics = {
-    "XGBoost": score(y_test, xgb_pred),
-    "Naive (persistence)": score(y_test, naive_pred),
-}
-# Directional accuracy is only defined for a model that predicts a change.
-# Persistence predicts none, so it gets no DirectionAcc key at all rather than
-# a misleading 0%.
-metrics["XGBoost"]["DirectionAcc"] = direction_acc(y_test, xgb_pred, prev)
-print(f"  XGBoost {metrics['XGBoost']}")
-print(f"  Naive   {metrics['Naive (persistence)']}")
-print(f"  max xgb prediction ${xgb_pred.max():,.0f} vs max actual ${y_test.max():,.0f}")
-
-# ------------------------------------------------------ kmeans + trend
-scaler_k = MinMaxScaler()
-scaled = scaler_k.fit_transform(df[["Close"]])
-df["Cluster"] = KMeans(n_clusters=5, random_state=42, n_init=10).fit_predict(scaled)
-recent = df[df["Cluster"] == df["Cluster"].iloc[-1]]["Close"].iloc[-30:]
-coeffs = np.polyfit(np.arange(len(recent)), recent.values, 1)
-kmeans_future = np.polyval(coeffs, np.arange(len(recent), len(recent) + HORIZON))
-metrics["KMeans+LR"] = score(df["Close"].iloc[-HORIZON:].values, kmeans_future)
-print(f"  KMeans+LR {metrics['KMeans+LR']}")
 
 # ---------------------------------------------------------------- lstm
-print("training LSTM ...")
+print("training LSTM on returns ...")
+import tensorflow as tf
 from tensorflow.keras import Sequential
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 
-scaler_l = MinMaxScaler()
-series = scaler_l.fit_transform(df[["Close"]])
+tf.keras.utils.set_random_seed(SEED)
+ret = df["LogRet"].values
+ret_sd = float(train["LogRet"].std())   # scale from the training years only
+z = ret / ret_sd
 
-Xs, ys = [], []
-for i in range(SEQ_LEN, len(series) - HORIZON):
-    Xs.append(series[i - SEQ_LEN:i, 0])
-    ys.append(series[i:i + HORIZON, 0])
-Xs = np.array(Xs).reshape(-1, SEQ_LEN, 1)
-ys = np.array(ys)
-
-cut = int(0.9 * len(Xs))
-model = Sequential([
+# window ending at position i-1 -> the next HORIZON returns (positions i .. i+6);
+# training windows must have every target before the test window starts
+starts = np.arange(SEQ_LEN, split_pos - HORIZON + 1)
+X_tr = np.stack([z[i - SEQ_LEN:i] for i in starts])[..., None]
+y_tr = np.stack([z[i:i + HORIZON] for i in starts])
+cut = int(0.9 * len(X_tr))              # chronological validation split
+lstm = Sequential([
     Input((SEQ_LEN, 1)),
-    LSTM(100, return_sequences=True), Dropout(0.2),
-    LSTM(100), Dropout(0.2),
+    LSTM(64, return_sequences=True), Dropout(0.2),
+    LSTM(32), Dropout(0.2),
     Dense(HORIZON),
 ])
-model.compile(optimizer="adam", loss="mean_squared_error")
-model.fit(
-    Xs[:cut], ys[:cut], validation_data=(Xs[cut:], ys[cut:]),
-    epochs=40, batch_size=32, verbose=0,
-    callbacks=[EarlyStopping(monitor="val_loss", patience=5,
-                             restore_best_weights=True)],
-)
+lstm.compile(optimizer="adam", loss="mean_squared_error")
+lstm.fit(X_tr[:cut], y_tr[:cut], validation_data=(X_tr[cut:], y_tr[cut:]),
+         epochs=40, batch_size=32, verbose=0,
+         callbacks=[EarlyStopping(monitor="val_loss", patience=5,
+                                  restore_best_weights=True)])
 
-lstm_test = model.predict(Xs[cut:], verbose=0)
-metrics["LSTM"] = score(
-    scaler_l.inverse_transform(ys[cut:]).ravel(),
-    scaler_l.inverse_transform(lstm_test).ravel(),
-)
-print(f"  LSTM {metrics['LSTM']}")
 
-lstm_future = scaler_l.inverse_transform(model.predict(Xs[-1:], verbose=0)).ravel()
+def lstm_returns(last_positions):
+    """Predicted next-HORIZON log returns from windows ending at each position."""
+    X = np.stack([z[p - SEQ_LEN + 1:p + 1] for p in last_positions])[..., None]
+    return lstm.predict(X, verbose=0) * ret_sd
+
+
+# one-day-ahead on the test window: the window ends the day before each test day
+lstm_pred = prev * np.exp(lstm_returns(np.arange(split_pos - 1, len(df) - 1))[:, 0])
+
+one_day = {
+    "XGBoost": {**score(actual, xgb_pred), **direction(xgb_pred)},
+    "LSTM": {**score(actual, lstm_pred), **direction(lstm_pred)},
+    "Naive (persistence)": score(actual, naive_pred),
+}
+for name, m in one_day.items():
+    print(f"  1-day {name:20} {m}")
+
+# ----------------------------------------- 7-day forecasts, rolling origin
+print("scoring 7-day forecasts by rolling origin ...")
+close = df["Close"].values
+
+
+origins = np.arange(split_pos - 1, len(df) - HORIZON, HORIZON)
+truth7 = np.concatenate([close[o + 1:o + 1 + HORIZON] for o in origins])
+lstm7 = np.concatenate([close[o] * np.exp(np.cumsum(r))
+                        for o, r in zip(origins, lstm_returns(origins))])
+naive7 = np.repeat(close[origins], HORIZON)
+seven_day = {
+    "LSTM": score(truth7, lstm7),
+    "Naive (flat)": score(truth7, naive7),
+}
+for name, m in seven_day.items():
+    print(f"  7-day {name:20} {m}")
+
+# ---------------------------------------------------------- volatility
+print("forecasting next-week volatility ...")
+VOL_FEATURES = ["RV_1", "RV_7", "RV_30"]
+# a training row's target covers t+1..t+7, so stop HORIZON days before SPLIT
+vol_train = df[df.index < pd.Timestamp(SPLIT) - pd.Timedelta(days=HORIZON)].dropna(subset=["RV_next7"])
+vol_test = test.dropna(subset=["RV_next7"])
+
+har = LinearRegression().fit(vol_train[VOL_FEATURES], vol_train["RV_next7"])
+har_pred = har.predict(vol_test[VOL_FEATURES])
+
+vol_xgb_features = VOL_FEATURES + ["Ret_Lag1", "Ret_Mean_7", "Dayofweek"]
+vol_search = RandomizedSearchCV(
+    xgb.XGBRegressor(objective="reg:squarederror", random_state=SEED),
+    {"learning_rate": [0.03, 0.1], "max_depth": [2, 3, 4],
+     "n_estimators": [100, 200, 400], "subsample": [0.8, 1.0]},
+    n_iter=8, cv=TimeSeriesSplit(n_splits=5), scoring="neg_mean_absolute_error",
+    random_state=SEED, n_jobs=-1, verbose=0,
+)
+vol_search.fit(vol_train[vol_xgb_features], vol_train["RV_next7"])
+vol_xgb_pred = vol_search.best_estimator_.predict(vol_test[vol_xgb_features])
+vol_naive = vol_test["RV_7"].values     # "next week looks like last week"
+
+vol_true = vol_test["RV_next7"].values
+volatility = {
+    "HAR": score(vol_true, har_pred),
+    "XGBoost": score(vol_true, vol_xgb_pred),
+    "Naive (last 7 days)": score(vol_true, vol_naive),
+}
+for name in ("HAR", "XGBoost"):
+    volatility[name]["VsNaive"] = 1 - volatility[name]["MAE"] / volatility["Naive (last 7 days)"]["MAE"]
+for name, m in volatility.items():
+    print(f"  vol   {name:20} {m}")
 
 # -------------------------------------------------------------- export
 pd.DataFrame({
-    "date": test.index,
-    "actual": np.asarray(y_test).ravel(),
-    "xgboost": np.asarray(xgb_pred).ravel(),
-    "naive": np.asarray(naive_pred).ravel(),
-}).to_csv(OUT / "predictions.csv", index=False)
+    "date": test.index.strftime("%Y-%m-%d"),
+    "actual": actual,
+    "xgboost": xgb_pred,
+    "lstm": lstm_pred,
+    "naive": naive_pred,
+}).round(2).to_csv(OUT / "predictions.csv", index=False)
 
 last = df.index.max()
+future_dates = pd.date_range(last + pd.Timedelta(days=1), periods=HORIZON, freq="D")
 pd.DataFrame({
-    "date": pd.date_range(last + pd.Timedelta(days=1), periods=HORIZON, freq="D"),
-    "lstm_forecast": lstm_future,
-    "kmeans_forecast": kmeans_future,
+    "date": future_dates.strftime("%Y-%m-%d"),
+    "lstm_forecast": close[-1] * np.exp(np.cumsum(lstm_returns([len(df) - 1])[0])),
 }).to_csv(OUT / "lstm_forecast.csv", index=False)
 
-(OUT / "metrics.json").write_text(json.dumps(metrics, indent=2))
+pd.DataFrame({
+    "date": vol_test.index.strftime("%Y-%m-%d"),
+    "actual": vol_true,
+    "har": har_pred,
+    "xgboost": vol_xgb_pred,
+    "naive": vol_naive,
+}).round(3).to_csv(OUT / "volatility.csv", index=False)
+
+(OUT / "metrics.json").write_text(json.dumps(
+    {"one_day": one_day, "seven_day": seven_day, "volatility": volatility}, indent=2))
 (OUT / "meta.json").write_text(json.dumps({
     "ticker": TICKER,
     "data_start": str(df.index.min().date()),
-    "data_end": str(df.index.max().date()),
+    "data_end": str(last.date()),
     "train_test_split": SPLIT,
     "n_train": int(len(train)),
     "n_test": int(len(test)),
+    "n_origins_7day": int(len(origins)),
     "xgb_best_params": {k: (v.item() if hasattr(v, "item") else v)
                         for k, v in search.best_params_.items()},
+    "har_coefficients": dict(zip(["intercept"] + VOL_FEATURES,
+                                 [float(har.intercept_)] + [float(c) for c in har.coef_])),
     "target": "log-return, price path reconstructed from previous actual close",
-    "note": ("XGBoost predicts log-returns; a naive persistence baseline is "
-             "included because one-step-ahead price R2 is high by construction. "
-             "Prophet omitted. See btc_pipeline.py header."),
+    "note": ("All models are scored on the same held-out window against the "
+             "baseline for their horizon; tuning uses time-series CV and scaling "
+             "uses training years only. Prophet omitted. See btc_pipeline.py header."),
 }, indent=2))
-
-print("\nwrote:", *[p.name for p in sorted(OUT.iterdir())])
+print(f"wrote {OUT}")
