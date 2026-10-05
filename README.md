@@ -35,6 +35,20 @@ The latest numbers are on the live demo and in `web/data/metrics.json`.
 
 ## Results, and an honest reading of them
 
+Test window 2023-01-01 to 2026-10-05 (1,374 days; 196 weekly origins for the
+7-day forecasts). Best in each group in bold.
+
+| Question | Model | MAE | R² | Direction |
+|---|---|---|---|---|
+| Tomorrow's price | XGBoost | $1,127 | 0.997 | 49.1% (p = 0.77) |
+| | LSTM | $1,126 | 0.997 | 50.7% (p = 0.32) |
+| | **Naive: tomorrow = today** | **$1,125** | 0.997 | — |
+| Price over the next 7 days | **LSTM** | **$2,140** | 0.988 | — |
+| | Naive: price stays flat | $2,142 | 0.988 | — |
+| Next week's volatility (annualized, % points) | **HAR, refitted weekly** | **15.5** | 0.007 | — |
+| | Naive: as volatile as last month | 16.4 | -0.126 | — |
+| | Naive: as volatile as last week | 18.8 | -0.560 | — |
+
 **On price, no model beats the naive baseline.** Predicting each day's close as
 the previous day's close is as accurate as XGBoost or the LSTM, and their
 directional accuracy is statistically indistinguishable from a coin flip.
@@ -50,10 +64,10 @@ leak.
 
 **Volatility is a different question.** Volatility clusters, with calm weeks
 tending to follow calm weeks, so how much the price will move is more
-predictable than which way. HAR is scored against the better of two naive
-baselines; the demo states the size of its edge rather than assuming one. A
-week of daily returns is a noisy measure of volatility, so R² stays low even
-when the forecast helps.
+predictable than which way. HAR's error is 6% below the better of the two naive
+baselines ("as volatile as last month") and 18% below "as volatile as last
+week": a modest, real edge, not a dramatic one. A week of daily returns is a
+noisy measure of volatility, so R² stays near zero even though the forecast helps.
 
 ## The extrapolation bug this replaced
 
